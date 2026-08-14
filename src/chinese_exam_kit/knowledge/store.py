@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping
 
+from .ingest import VerificationCase, evaluate_status
+
 
 @dataclass(frozen=True)
 class KnowledgeCard:
@@ -100,19 +102,124 @@ def parse_card(path: Path) -> KnowledgeCard:
     return KnowledgeCard(path=path, metadata=metadata, sections=_sections(body), body=body)
 
 
-def _card_paths(root: Path) -> list[Path]:
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_card_paths(root: Path) -> tuple[list[Path], list[Issue]]:
+    """Discover cards without following a symlink outside the library root."""
+    root = root.resolve()
     cards_root = root / "cards"
-    return sorted(cards_root.glob("*/*.md")) if cards_root.is_dir() else []
+    issues: list[Issue] = []
+    paths: list[Path] = []
+    if not cards_root.exists():
+        if cards_root.is_symlink():
+            issues.append(
+                Issue("error", "path_escape", "cards", "card path escapes the library")
+            )
+        return paths, issues
+    try:
+        resolved_cards = cards_root.resolve(strict=True)
+    except OSError:
+        issues.append(
+            Issue(
+                "error",
+                "unreadable_path",
+                "cards",
+                "card directory cannot be resolved",
+            )
+        )
+        return paths, issues
+    if not _inside(resolved_cards, root):
+        issues.append(Issue("error", "path_escape", "cards", "card path escapes the library"))
+        return paths, issues
+    try:
+        directories = sorted(cards_root.iterdir(), key=lambda item: item.name)
+    except OSError:
+        issues.append(Issue("error", "unreadable_path", "cards", "card directory cannot be read"))
+        return paths, issues
+    for directory in directories:
+        try:
+            resolved_directory = directory.resolve(strict=True)
+        except OSError:
+            issues.append(
+                Issue(
+                    "error",
+                    "unreadable_path",
+                    _display_path(directory, root),
+                    "card directory cannot be resolved",
+                )
+            )
+            continue
+        if not _inside(resolved_directory, root):
+            issues.append(
+                Issue(
+                    "error",
+                    "path_escape",
+                    _display_path(directory, root),
+                    "card path escapes the library",
+                )
+            )
+            continue
+        if not directory.is_dir():
+            continue
+        try:
+            candidates = sorted(directory.iterdir(), key=lambda item: item.name)
+        except OSError:
+            issues.append(
+                Issue(
+                    "error",
+                    "unreadable_path",
+                    _display_path(directory, root),
+                    "card directory cannot be read",
+                )
+            )
+            continue
+        for path in candidates:
+            if path.suffix != ".md":
+                continue
+            try:
+                resolved_path = path.resolve(strict=True)
+            except OSError:
+                issues.append(
+                    Issue(
+                        "error",
+                        "unreadable_path",
+                        _display_path(path, root),
+                        "card file cannot be resolved",
+                    )
+                )
+                continue
+            if not _inside(resolved_path, root):
+                issues.append(
+                    Issue(
+                        "error",
+                        "path_escape",
+                        _display_path(path, root),
+                        "card path escapes the library",
+                    )
+                )
+                continue
+            if path.is_file():
+                paths.append(path)
+    return paths, issues
 
 
 def discover_cards(root: Path) -> tuple[KnowledgeCard, ...]:
-    return tuple(parse_card(path) for path in _card_paths(root))
+    paths, issues = _safe_card_paths(Path(root))
+    if issues:
+        raise ValueError("knowledge library contains unsafe or unreadable card paths")
+    return tuple(parse_card(path) for path in paths)
 
 
 def _display_path(path: Path, root: Path) -> str:
     try:
-        return path.resolve().relative_to(root.resolve()).as_posix()
-    except (OSError, ValueError):
+        return path.absolute().relative_to(root.absolute()).as_posix()
+    except ValueError:
         return path.name
 
 
@@ -131,23 +238,134 @@ def _locator_escapes(value: str) -> bool:
     return ".." in PurePosixPath(location).parts
 
 
-def _issue(card: KnowledgeCard, root: Path, code: str, message: str, level: str = "error") -> Issue:
+def _issue(
+    card: KnowledgeCard,
+    root: Path,
+    code: str,
+    message: str,
+    level: str = "error",
+) -> Issue:
     return Issue(level, code, _display_path(card.path, root), message)
 
 
-def _validate_card(card: KnowledgeCard, root: Path, contract: Mapping[str, Any]) -> list[Issue]:
+def _nonempty_string_list(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(
+        isinstance(item, str) and bool(item.strip()) for item in value
+    )
+
+
+def _verification_cases(
+    card: KnowledgeCard,
+    root: Path,
+) -> tuple[tuple[VerificationCase, ...], list[Issue]]:
+    raw_cases = card.metadata.get("verification_cases", [])
+    if not isinstance(raw_cases, list):
+        return (), [
+            _issue(
+                card,
+                root,
+                "invalid_verification_cases",
+                "verification_cases must be an array of tables",
+            )
+        ]
+    cases: list[VerificationCase] = []
+    issues: list[Issue] = []
+    for raw_case in raw_cases:
+        if not isinstance(raw_case, dict):
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    "invalid_verification_case",
+                    "verification case must be an object",
+                )
+            )
+            continue
+        try:
+            exam_id = raw_case["exam_id"]
+            source_id = raw_case["source_id"]
+            if (
+                not isinstance(exam_id, str)
+                or not exam_id.strip()
+                or not isinstance(source_id, str)
+                or not source_id.strip()
+            ):
+                raise ValueError("verification ids must be nonempty strings")
+            exam_year = raw_case.get("exam_year")
+            if exam_year is not None and not isinstance(exam_year, int):
+                raise ValueError("exam_year must be an integer")
+            official_support = raw_case.get("official_support", False)
+            conflict = raw_case.get("conflict", False)
+            if not isinstance(official_support, bool) or not isinstance(conflict, bool):
+                raise ValueError("verification flags must be booleans")
+            cases.append(
+                VerificationCase(
+                    exam_id=exam_id,
+                    source_id=source_id,
+                    exam_year=exam_year,
+                    evidence_kind=str(raw_case.get("evidence_kind", "formal_exam")),
+                    official_support=official_support,
+                    conflict=conflict,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    "invalid_verification_case",
+                    "verification case does not satisfy the public contract",
+                )
+            )
+    return tuple(cases), issues
+
+
+def _validate_card(
+    card: KnowledgeCard,
+    root: Path,
+    contract: Mapping[str, Any],
+) -> list[Issue]:
     issues: list[Issue] = []
     metadata = card.metadata
     required = contract["required_metadata"]
     for field in required:
         if field not in metadata:
-            issues.append(_issue(card, root, "missing_metadata", f"missing metadata field: {field}"))
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    "missing_metadata",
+                    f"missing metadata field: {field}",
+                )
+            )
+
+    schema_version = metadata.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != contract["schema_version"]
+    ):
+        issues.append(
+            _issue(
+                card,
+                root,
+                "unsupported_schema_version",
+                "card schema_version is unsupported",
+            )
+        )
+    if not isinstance(metadata.get("title"), str) or not str(
+        metadata.get("title", "")
+    ).strip():
+        issues.append(_issue(card, root, "invalid_title", "card title must be nonempty"))
 
     card_type = str(metadata.get("card_type", ""))
     type_contract = contract["card_types"].get(card_type)
     if type_contract is None:
         issues.append(_issue(card, root, "invalid_card_type", "unknown card type"))
-    elif not re.fullmatch(rf"{re.escape(type_contract['prefix'])}-\d{{4}}", str(metadata.get("id", ""))):
+    elif not re.fullmatch(
+        rf"{re.escape(type_contract['prefix'])}-\d{{4}}",
+        str(metadata.get("id", "")),
+    ):
         issues.append(_issue(card, root, "invalid_id", "card id does not match its type"))
 
     if metadata.get("status") not in contract["statuses"]:
@@ -155,14 +373,38 @@ def _validate_card(card: KnowledgeCard, root: Path, contract: Mapping[str, Any])
     if metadata.get("risk_level") not in contract["risk_levels"]:
         issues.append(_issue(card, root, "invalid_risk_level", "unknown risk level"))
     modules = metadata.get("modules", [])
-    if not isinstance(modules, list) or not modules or any(
-        module not in contract["modules"] for module in modules
+    if not _nonempty_string_list(modules) or any(
+        module not in contract["modules"] for module in modules if isinstance(module, str)
     ):
-        issues.append(_issue(card, root, "invalid_module", "modules contain unknown or empty values"))
+        issues.append(
+            _issue(
+                card,
+                root,
+                "invalid_module",
+                "modules contain unknown or empty values",
+            )
+        )
+    for field in ("question_types", "abilities"):
+        if not _nonempty_string_list(metadata.get(field)):
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    f"invalid_{field}",
+                    f"{field} must be a nonempty string array",
+                )
+            )
 
     for heading in contract["required_sections"]:
         if not card.sections.get(heading, "").strip():
-            issues.append(_issue(card, root, "missing_section", f"missing or empty section: {heading}"))
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    "missing_section",
+                    f"missing or empty section: {heading}",
+                )
+            )
 
     sources = metadata.get("sources", [])
     if not isinstance(sources, list) or not sources:
@@ -176,28 +418,111 @@ def _validate_card(card: KnowledgeCard, root: Path, contract: Mapping[str, Any])
                 not isinstance(source.get(field), str) or not source[field].strip()
                 for field in contract.get("required_source_fields", ("kind", "name", "locator"))
             ):
-                issues.append(_issue(card, root, "invalid_source", "source fields must be nonempty"))
+                issues.append(
+                    _issue(
+                        card,
+                        root,
+                        "invalid_source",
+                        "source fields must be nonempty",
+                    )
+                )
             if source.get("kind") not in contract["source_kinds"]:
                 issues.append(_issue(card, root, "invalid_source", "unknown source kind"))
             locator = source.get("locator")
             if not isinstance(locator, str) or not locator.strip():
                 issues.append(_issue(card, root, "invalid_source", "source locator is required"))
             elif _is_absolute_locator(locator):
-                issues.append(_issue(card, root, "absolute_path", "source locator must be project-relative"))
+                issues.append(
+                    _issue(
+                        card,
+                        root,
+                        "absolute_path",
+                        "source locator must be project-relative",
+                    )
+                )
             elif _locator_escapes(locator):
-                issues.append(_issue(card, root, "path_escape", "source locator cannot escape the project"))
+                issues.append(
+                    _issue(
+                        card,
+                        root,
+                        "path_escape",
+                        "source locator cannot escape the project",
+                    )
+                )
+
+    cases, case_issues = _verification_cases(card, root)
+    issues.extend(case_issues)
+    status = metadata.get("status")
+    if (
+        status in {"verified", "stable"}
+        and not case_issues
+        and metadata.get("risk_level") in contract["risk_levels"]
+    ):
+        decision = evaluate_status(
+            card_type or "unknown",
+            verification_cases=cases,
+            risk_level=str(metadata.get("risk_level", "normal")),
+        )
+        supported = decision.status in (
+            {"verified", "stable"} if status == "verified" else {"stable"}
+        )
+        if not supported:
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    "unsupported_declared_status",
+                    "declared status exceeds independent verification evidence",
+                )
+            )
+    status_fields = contract.get(
+        "status_required_fields",
+        {"review_required": "review_reason", "deprecated": "deprecation_reason"},
+    )
+    review_field = str(status_fields.get("review_required", "review_reason"))
+    if status == "review_required":
+        has_conflict = any(case.conflict for case in cases)
+        if not has_conflict and not str(metadata.get(review_field, "")).strip():
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    f"missing_{review_field}",
+                    "review_required status needs a conflict or review reason",
+                )
+            )
+    deprecated_field = str(
+        status_fields.get("deprecated", "deprecation_reason")
+    )
+    if status == "deprecated" and not str(metadata.get(deprecated_field, "")).strip():
+        issues.append(
+            _issue(
+                card,
+                root,
+                f"missing_{deprecated_field}",
+                "deprecated status needs a deprecation reason",
+            )
+        )
     return issues
 
 
 def validate_library(root: Path, contract: Mapping[str, Any]) -> LibraryValidation:
-    root = Path(root)
-    issues: list[Issue] = []
+    root = Path(root).resolve()
+    paths, path_issues = _safe_card_paths(root)
+    issues: list[Issue] = list(path_issues)
     cards: list[KnowledgeCard] = []
-    for path in _card_paths(root):
+    for path in paths:
         try:
             cards.append(parse_card(path))
         except (OSError, ValueError, tomllib.TOMLDecodeError):
-            issues.append(Issue("error", "card_parse_error", _display_path(path, root), "card cannot be parsed"))
+            issues.append(
+                Issue(
+                    "error",
+                    "card_parse_error",
+                    _display_path(path, root),
+                    "card cannot be parsed",
+                )
+            )
 
     for card in cards:
         issues.extend(_validate_card(card, root, contract))
@@ -209,17 +534,38 @@ def validate_library(root: Path, contract: Mapping[str, Any]) -> LibraryValidati
             ids[card_id] = ids.get(card_id, 0) + 1
     for card_id, count in sorted(ids.items()):
         if count > 1:
-            issues.append(Issue("error", "duplicate_id", "cards", f"duplicate card id: {card_id}"))
+            issues.append(
+                Issue(
+                    "error",
+                    "duplicate_id",
+                    "cards",
+                    f"duplicate card id: {card_id}",
+                )
+            )
     index_path = root / "index.json"
     if index_path.is_file():
         try:
             saved = json.loads(index_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            issues.append(Issue("error", "invalid_index", "index.json", "index is not valid JSON"))
+            issues.append(
+                Issue(
+                    "error",
+                    "invalid_index",
+                    "index.json",
+                    "index is not valid JSON",
+                )
+            )
         else:
             has_card_errors = any(issue.level == "error" for issue in issues)
             if not has_card_errors and saved != build_index(tuple(cards), contract, root):
-                issues.append(Issue("error", "index_out_of_sync", "index.json", "index must be rebuilt"))
+                issues.append(
+                    Issue(
+                        "error",
+                        "index_out_of_sync",
+                        "index.json",
+                        "index must be rebuilt",
+                    )
+                )
     return LibraryValidation(tuple(cards), tuple(issues))
 
 
@@ -236,6 +582,11 @@ def build_index(
     base = Path(root) if root is not None else Path(".")
     entries: list[dict[str, Any]] = []
     for card in sorted(card_items, key=lambda item: item.card_id):
+        raw_path = card.path.as_posix()
+        if (PureWindowsPath(raw_path).is_absolute() and not card.path.is_absolute()) or (
+            "\\" in raw_path
+        ):
+            raise ValueError("card path must stay inside the knowledge library")
         if card.path.is_absolute():
             try:
                 relative_path = card.path.resolve().relative_to(base.resolve()).as_posix()
@@ -243,6 +594,12 @@ def build_index(
                 raise ValueError("card path must stay inside the knowledge library") from error
         else:
             relative = PurePosixPath(card.path.as_posix())
+            lexical_base = PurePosixPath(base.as_posix())
+            if root is not None and not lexical_base.is_absolute():
+                try:
+                    relative = relative.relative_to(lexical_base)
+                except ValueError:
+                    pass
             if ".." in relative.parts:
                 raise ValueError("card path must stay inside the knowledge library")
             relative_path = relative.as_posix()
@@ -298,7 +655,11 @@ def search_cards(
             "body": card.body,
         }
         weights = {"id": 100, "title": 80, "tags": 50, "body": 20}
-        matched = tuple(name for name, value in fields.items() if needle and needle in _normalized(value))
+        matched = tuple(
+            name
+            for name, value in fields.items()
+            if needle and needle in _normalized(value)
+        )
         if not needle or matched:
             results.append(SearchResult(card, sum(weights[name] for name in matched), matched))
     return tuple(sorted(results, key=lambda item: (-item.score, item.card.card_id)))

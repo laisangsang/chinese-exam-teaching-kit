@@ -51,6 +51,7 @@ def test_match_manifest_records_applicability_reason():
     assert order.matches[0].reason
     assert order.matches[0].question_id == "1"
     assert order.matches[0].card_id == "MT-0001"
+    assert order.matches[0].applicability == "applicable"
 
 
 def test_match_manifest_is_deterministic():
@@ -74,7 +75,7 @@ def test_match_manifest_reuses_a_card_generator_for_every_question():
     ]
 
 
-def test_non_applicable_card_is_not_silently_used():
+def test_non_applicable_card_is_recorded_with_reason_and_boundary():
     card = sample_card()
     card = KnowledgeCard(
         path=card.path,
@@ -85,7 +86,89 @@ def test_non_applicable_card_is_not_silently_used():
 
     order = match_manifest((sample_question(),), (card,))
 
+    assert len(order.matches) == 1
+    assert order.matches[0].applicability == "not_applicable"
+    assert order.matches[0].reason
+    assert order.matches[0].boundary == "不得迁移具体答案。"
+
+
+def test_single_question_type_label_is_not_enough_for_applicability():
+    card = sample_card()
+    card = KnowledgeCard(
+        path=card.path,
+        metadata={**card.metadata, "abilities": ["unrelated_ability"]},
+        sections={
+            **card.sections,
+            "知识表述": "分析诗歌声音与色彩。",
+            "支持证据": "只适用于诗歌画面。",
+        },
+        body="分析诗歌声音与色彩。",
+    )
+
+    order = match_manifest((sample_question(),), (card,))
+
+    assert order.matches[0].matched_dimensions == ("question_type",)
+    assert order.matches[0].applicability == "not_applicable"
+
+
+def test_question_type_and_ability_combination_is_conservatively_applicable():
+    card = sample_card()
+    card = KnowledgeCard(
+        path=card.path,
+        metadata=card.metadata,
+        sections={
+            **card.sections,
+            "知识表述": "分析诗歌声音与色彩。",
+            "支持证据": "只适用于诗歌画面。",
+        },
+        body="分析诗歌声音与色彩。",
+    )
+
+    order = match_manifest((sample_question(),), (card,))
+
+    assert order.matches[0].matched_dimensions == ("question_type", "ability")
+    assert order.matches[0].applicability == "applicable"
+
+
+def test_generic_two_character_overlap_is_not_a_core_task_match():
+    question = sample_question()
+    question = QuestionKnowledge(
+        question_id=question.question_id,
+        module=question.module,
+        question_type="different_type",
+        abilities=("different_ability",),
+        task_statement="分析人物选择",
+        evidence_anchor="人物行动",
+        answer_boundary=question.answer_boundary,
+        retrieval_queries=("人物选择",),
+    )
+    card = sample_card()
+    card = KnowledgeCard(
+        path=card.path,
+        metadata={
+            **card.metadata,
+            "question_types": ["other_type"],
+            "abilities": ["other_ability"],
+        },
+        sections={
+            **card.sections,
+            "知识表述": "分析诗歌声音与色彩。",
+            "支持证据": "诗歌画面与听觉。",
+        },
+        body="分析诗歌声音与色彩。",
+    )
+
+    order = match_manifest((question,), (card,))
+
+    assert order.matches[0].matched_dimensions == ()
+    assert order.matches[0].applicability == "not_applicable"
+
+
+def test_match_manifest_records_completion_when_no_cards_exist():
+    order = match_manifest((sample_question("1"), sample_question("2")), ())
+
     assert order.matches == ()
+    assert order.completed_question_ids == ("1", "2")
 
 
 def test_append_audit_event_is_json_safe_and_relative(tmp_path):
@@ -141,6 +224,46 @@ def test_append_audit_event_rejects_absolute_path_leaks(tmp_path, secret):
         )
 
     assert not (tmp_path / "audit" / "original-task.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "前缀 /Users/example/My Private/source.pdf 后缀",
+        r"前缀 C:\Users\example\My Files\source.pdf 后缀",
+        r"前缀 \\server\share\My Files\source.pdf 后缀",
+        "前缀 file:///tmp/My Private/source.pdf 后缀",
+        "前缀 file:/tmp/My Private/source.pdf 后缀",
+    ],
+)
+@pytest.mark.parametrize("location", ["key", "value"])
+def test_audit_rejects_embedded_absolute_paths_in_keys_and_values(
+    tmp_path, secret, location
+):
+    details = {secret: "safe"} if location == "key" else {"source": secret}
+
+    with pytest.raises(ValueError, match="absolute path") as captured:
+        append_audit_event(
+            tmp_path,
+            task_id="original-task",
+            stage="pre",
+            event="search",
+            details=details,
+        )
+
+    assert secret not in str(captured.value)
+    assert not (tmp_path / "audit" / "original-task.jsonl").exists()
+
+
+def test_audit_rejects_single_segment_absolute_posix_path(tmp_path):
+    with pytest.raises(ValueError, match="absolute path"):
+        append_audit_event(
+            tmp_path,
+            task_id="original-task",
+            stage="pre",
+            event="search",
+            details={"source": "/tmp"},
+        )
 
 
 def test_append_audit_event_rejects_non_json_values_without_touching_file(tmp_path):

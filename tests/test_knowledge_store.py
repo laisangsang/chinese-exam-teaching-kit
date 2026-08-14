@@ -6,6 +6,7 @@ import pytest
 from chinese_exam_kit.knowledge.store import (
     build_index,
     load_contract,
+    parse_card,
     search_cards,
     validate_library,
 )
@@ -25,7 +26,9 @@ risk_level = "normal"
 modules = ["reading_1"]
 question_types = ["information_extraction"]
 abilities = ["evidence_location"]
-sources = [{{ kind = "original_example", name = "原创微型案例", locator = "examples/original-mini-exam/README.md" }}]
+sources = [
+  {{ kind = "original_example", name = "原创微型案例", locator = "examples/original-mini-exam/README.md" }}
+]
 +++
 
 ## 知识表述
@@ -46,6 +49,28 @@ sources = [{{ kind = "original_example", name = "原创微型案例", locator = 
         encoding="utf-8",
     )
     return path
+
+
+def _verification_tables(*cases: dict[str, object]) -> str:
+    tables = []
+    for case in cases:
+        lines = ["[[verification_cases]]"]
+        for key, value in case.items():
+            rendered = json.dumps(value, ensure_ascii=False)
+            if isinstance(value, bool):
+                rendered = rendered.lower()
+            lines.append(f"{key} = {rendered}")
+        tables.append("\n".join(lines))
+    return "\n\n".join(tables)
+
+
+def _add_verification_cases(card_path: Path, *cases: dict[str, object]) -> None:
+    text = card_path.read_text(encoding="utf-8")
+    marker = "+++\n\n## 知识表述"
+    card_path.write_text(
+        text.replace(marker, f"{_verification_tables(*cases)}\n+++\n\n## 知识表述"),
+        encoding="utf-8",
+    )
 
 
 def test_empty_public_library_is_valid(tmp_path):
@@ -73,6 +98,21 @@ def test_index_rejects_card_path_outside_library(tmp_path):
     parsed = validate_library(tmp_path, contract).cards[0]
     escaped = type(parsed)(
         path=Path("/private/knowledge/MT-0001.md"),
+        metadata=parsed.metadata,
+        sections=parsed.sections,
+        body=parsed.body,
+    )
+
+    with pytest.raises(ValueError, match="inside the knowledge library"):
+        build_index((escaped,), contract, tmp_path)
+
+
+def test_index_rejects_windows_absolute_card_path_on_any_platform(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    _write_card(tmp_path, card_id="MT-0001", title="索引边界", body="只记录相对路径。")
+    parsed = validate_library(tmp_path, contract).cards[0]
+    escaped = type(parsed)(
+        path=Path(r"C:\private\knowledge\MT-0001.md"),
         metadata=parsed.metadata,
         sections=parsed.sections,
         body=parsed.body,
@@ -161,3 +201,180 @@ def test_source_requires_a_traceable_name(tmp_path):
     result = validate_library(tmp_path, contract)
 
     assert "invalid_source" in {issue.code for issue in result.errors}
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "code"),
+    [
+        ("schema_version = 1", "schema_version = 2", "unsupported_schema_version"),
+        ("schema_version = 1", "schema_version = true", "unsupported_schema_version"),
+        ('title = "字段合同"', 'title = ""', "invalid_title"),
+        (
+            'question_types = ["information_extraction"]',
+            'question_types = "information_extraction"',
+            "invalid_question_types",
+        ),
+        ('abilities = ["evidence_location"]', 'abilities = [""]', "invalid_abilities"),
+    ],
+)
+def test_card_metadata_contract_rejects_invalid_shapes(tmp_path, old, new, code):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="字段合同", body="测试字段合同。"
+    )
+    card_path.write_text(
+        card_path.read_text(encoding="utf-8").replace(old, new), encoding="utf-8"
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert code in {issue.code for issue in result.errors}
+
+
+@pytest.mark.parametrize("declared_status", ["verified", "stable"])
+def test_verified_or_stable_card_requires_independent_exam_evidence(tmp_path, declared_status):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="状态门槛", body="测试状态门槛。"
+    )
+    card_path.write_text(
+        card_path.read_text(encoding="utf-8").replace(
+            'status = "candidate"', f'status = "{declared_status}"'
+        ),
+        encoding="utf-8",
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert "unsupported_declared_status" in {issue.code for issue in result.errors}
+
+
+def test_stable_card_accepts_two_distinct_exam_cases(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="稳定门槛", body="测试稳定门槛。"
+    )
+    card_path.write_text(
+        card_path.read_text(encoding="utf-8").replace(
+            'status = "candidate"', 'status = "stable"'
+        ),
+        encoding="utf-8",
+    )
+    _add_verification_cases(
+        card_path,
+        {
+            "exam_id": "original-exam-a",
+            "source_id": "original-source-a",
+            "exam_year": 2024,
+            "evidence_kind": "formal_exam",
+            "official_support": False,
+        },
+        {
+            "exam_id": "original-exam-b",
+            "source_id": "original-source-b",
+            "exam_year": 2025,
+            "evidence_kind": "formal_exam",
+            "official_support": False,
+        },
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert result.errors == ()
+
+
+def test_verification_case_ids_must_be_nonempty_strings(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="验证字段", body="测试验证字段。"
+    )
+    _add_verification_cases(
+        card_path,
+        {
+            "exam_id": 1,
+            "source_id": "original-source-a",
+            "exam_year": 2025,
+            "evidence_kind": "formal_exam",
+            "official_support": False,
+        },
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert "invalid_verification_case" in {issue.code for issue in result.errors}
+
+
+@pytest.mark.parametrize(
+    ("declared_status", "reason_field"),
+    [("review_required", "review_reason"), ("deprecated", "deprecation_reason")],
+)
+def test_terminal_status_requires_an_explicit_reason(tmp_path, declared_status, reason_field):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="状态原因", body="测试状态原因。"
+    )
+    card_path.write_text(
+        card_path.read_text(encoding="utf-8").replace(
+            'status = "candidate"', f'status = "{declared_status}"'
+        ),
+        encoding="utf-8",
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert f"missing_{reason_field}" in {issue.code for issue in result.errors}
+
+
+def test_relative_library_root_indexes_cards_relative_to_the_library(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    root = Path("knowledge")
+    _write_card(root, card_id="MT-0001", title="相对根", body="测试相对根。")
+    contract = load_contract(
+        Path(__file__).resolve().parents[1] / "config/knowledge_contract.json"
+    )
+
+    direct_index = build_index(
+        (parse_card(root / "cards" / "methods" / "MT-0001.md"),), contract, root
+    )
+    assert direct_index["cards"][0]["path"] == "cards/methods/MT-0001.md"
+
+    result = validate_library(root, contract)
+    index = build_index(result.cards, contract, root)
+
+    assert result.errors == ()
+    assert index["cards"][0]["path"] == "cards/methods/MT-0001.md"
+    (root / "index.json").write_text(
+        json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    assert validate_library(root, contract).errors == ()
+
+
+@pytest.mark.parametrize("link_kind", ["file", "directory"])
+def test_validate_library_rejects_symlink_escape_without_reading_target(tmp_path, link_kind):
+    if not hasattr(Path, "symlink_to"):
+        pytest.skip("symlinks are unavailable")
+    root = tmp_path / "knowledge"
+    outside = tmp_path / "outside"
+    outside_card = _write_card(
+        outside, card_id="MT-0001", title="外部卡片", body="不能读取。"
+    )
+    (root / "cards").mkdir(parents=True)
+    try:
+        if link_kind == "directory":
+            (root / "cards" / "methods").symlink_to(outside_card.parent, target_is_directory=True)
+        else:
+            (root / "cards" / "methods").mkdir()
+            (root / "cards" / "methods" / "MT-0001.md").symlink_to(outside_card)
+            (root / "index.json").write_text(
+                '{"schema_version":1,"generated_at":null,"cards":[]}\n',
+                encoding="utf-8",
+            )
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+
+    result = validate_library(root, load_contract(Path("config/knowledge_contract.json")))
+
+    assert result.cards == ()
+    assert [issue.code for issue in result.errors] == ["path_escape"]
+    rendered = json.dumps([issue.to_dict() for issue in result.errors], ensure_ascii=False)
+    assert str(outside) not in rendered

@@ -51,6 +51,11 @@
     "反例与冲突"
   ],
   "required_source_fields": ["kind", "name", "locator"],
+  "verification_case_fields": ["exam_id", "source_id"],
+  "status_required_fields": {
+    "review_required": "review_reason",
+    "deprecated": "deprecation_reason"
+  },
   "source_kinds": [
     "formal_exam",
     "formal_answer",

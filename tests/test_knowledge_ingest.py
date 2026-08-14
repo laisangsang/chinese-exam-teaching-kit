@@ -176,3 +176,29 @@ def test_official_support_requires_formal_answer_evidence():
             evidence_kind="formal_exam",
             official_support=True,
         )
+
+
+@pytest.mark.parametrize(
+    "cases",
+    [(), (one_case(evidence_kind="text_inference"),)],
+)
+def test_review_resolution_without_independent_evidence_stays_in_review(cases):
+    decision = evaluate_status(
+        "method",
+        current_status="review_required",
+        resolve_review=True,
+        verification_cases=cases,
+    )
+
+    assert decision.status == "review_required"
+
+
+def test_review_resolution_with_independent_evidence_can_restore_verified():
+    decision = evaluate_status(
+        "method",
+        current_status="review_required",
+        resolve_review=True,
+        verification_cases=(one_case(),),
+    )
+
+    assert decision.status == "verified"

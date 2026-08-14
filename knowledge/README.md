@@ -13,5 +13,6 @@
 - `deprecated`：废止，保留历史记录和替代关系，不再作为现行方法。
 
 单套试卷只能把候选知识推进到 `verified`，不能推进到 `stable`。纯文本推导不能单独完成验证。任何反例或冲突都会触发复审。
+`review_required` 卡必须记录 `review_reason`（或冲突验证案例），`deprecated` 卡必须记录 `deprecation_reason`，避免状态变化失去可追溯原因。
 
 未来如需提供演示知识卡，只能放在 `examples/original-mini-exam/knowledge/`，并明确标注为原创案例；演示卡不得放入本公共稳定库，也不得冒充已完成跨试卷验证的稳定知识。

@@ -131,7 +131,11 @@ def evaluate_status(
     if risk_level not in {"normal", "high"}:
         raise ValueError("risk_level must be normal or high")
     if conflict is not None or any(case.conflict for case in verification_cases):
-        reason = conflict.reason if conflict is not None else "verification case records a conflict"
+        reason = (
+            conflict.reason
+            if conflict is not None
+            else "verification case records a conflict"
+        )
         return StatusDecision("review_required", reason)
     if current_status == "deprecated":
         return StatusDecision("deprecated", "deprecated knowledge remains as a historical record")
@@ -142,6 +146,10 @@ def evaluate_status(
         case for case in verification_cases if case.evidence_kind != "text_inference"
     )
     unique_exams = {case.exam_id for case in positive}
+    if current_status == "review_required" and resolve_review and not unique_exams:
+        return StatusDecision(
+            "review_required", "independent review evidence is required for resolution"
+        )
     if not unique_exams:
         return StatusDecision("candidate", "no independent exam verification recorded")
     threshold = 3 if risk_level == "high" else 2
@@ -156,6 +164,10 @@ def evaluate_status(
         official = any(
             case.evidence_kind == "formal_answer" and case.official_support for case in positive
         )
-        warnings = () if official else ("high-risk stable knowledge should prefer official answer support",)
+        warnings = (
+            ()
+            if official
+            else ("high-risk stable knowledge should prefer official answer support",)
+        )
         return StatusDecision("stable", "validated by three diverse exams", warnings)
     return StatusDecision("stable", f"validated by {len(unique_exams)} distinct exams")

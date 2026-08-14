@@ -14,6 +14,12 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
+_FILE_URI = re.compile(r"(?i)file:[/\\]")
+_WINDOWS_DRIVE_PATH = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]")
+_UNC_PATH = re.compile(r"(?<!\\)\\\\[^\\\r\n]+\\")
+_POSIX_PATH = re.compile(r"(?<![:/A-Za-z0-9])/(?:[^/\r\n]+/)+")
+
+
 @dataclass(frozen=True)
 class QuestionKnowledge:
     question_id: str
@@ -41,12 +47,14 @@ class QuestionKnowledge:
 
 
 def _absolute_path_like(value: str) -> bool:
-    text = value.strip()
-    return (
-        text.startswith("file:")
-        or PurePosixPath(text).is_absolute()
-        or PureWindowsPath(text).is_absolute()
-        or text.startswith("\\\\")
+    stripped = value.strip()
+    return bool(
+        PurePosixPath(stripped).is_absolute()
+        or PureWindowsPath(stripped).is_absolute()
+        or _FILE_URI.search(value)
+        or _WINDOWS_DRIVE_PATH.search(value)
+        or _UNC_PATH.search(value)
+        or _POSIX_PATH.search(value)
     )
 
 
@@ -66,7 +74,8 @@ def _validate_json_safe(value: Any) -> None:
             _validate_json_safe(item)
         return
     if isinstance(value, dict) and all(isinstance(key, str) for key in value):
-        for item in value.values():
+        for key, item in value.items():
+            _validate_json_safe(key)
             _validate_json_safe(item)
         return
     raise ValueError("audit values must be JSON-safe")
