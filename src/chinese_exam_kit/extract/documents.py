@@ -17,6 +17,7 @@ from .providers import CapabilityUnavailable, OcrProvider, Renderer, TextReader
 TEXT_LAYER_MINIMUM_CHARACTERS = 80
 EFFECTIVE_CHARACTER_RE = re.compile(r"[A-Za-z\u4e00-\u9fff]")
 QUESTION_RE = re.compile(r"(?m)^\s*(?P<number>\d{1,3})[.．、]\s*")
+RENDERED_PAGE_RE = re.compile(r"page-(?P<number>\d+)")
 SECTION_HEADING_PATTERNS = (
     ("reading_1", re.compile(r"(?:信息类文本|非连续性文本)阅读")),
     ("reading_2", re.compile(r"(?:文学类文本|小说|散文)阅读")),
@@ -107,7 +108,7 @@ def extract_document(
     render_pages = renderer or _render_pdf_pages
     with tempfile.TemporaryDirectory(prefix="cekit-extract-") as temporary:
         images = tuple(render_pages(source, Path(temporary)))
-        image_by_page = {number: image for number, image in enumerate(images, 1)}
+        image_by_page = _rendered_pages_by_number(images, page_count=len(pages))
         missing_pages = sorted(sparse - set(image_by_page))
         if missing_pages:
             rendered = "、".join(str(number) for number in missing_pages)
@@ -245,6 +246,27 @@ def _render_pdf_pages(path: Path, output_dir: Path) -> list[Path]:
 def _page_image_sort_key(path: Path) -> tuple[int, str]:
     match = re.search(r"(\d+)(?!.*\d)", path.stem)
     return (int(match.group(1)) if match else 0, path.name)
+
+
+def _rendered_pages_by_number(
+    images: Sequence[Path],
+    *,
+    page_count: int,
+) -> dict[int, Path]:
+    """Validate renderer output using its strict ``page-N`` filename contract."""
+    by_number: dict[int, Path] = {}
+    for item in images:
+        image = Path(item)
+        match = RENDERED_PAGE_RE.fullmatch(image.stem)
+        if match is None:
+            raise ValueError("渲染结果包含无法识别页码的文件；文件名必须为 page-N")
+        number = int(match.group("number"))
+        if number < 1 or number > page_count:
+            raise ValueError(f"渲染页码 {number} 超出文档范围 1-{page_count}")
+        if number in by_number:
+            raise ValueError(f"渲染结果包含重复页码 {number}")
+        by_number[number] = image
+    return by_number
 
 
 def _section_heading_events(text: str) -> list[tuple[int, str]]:

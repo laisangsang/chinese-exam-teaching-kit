@@ -62,8 +62,81 @@ def test_macos_provider_failure_does_not_echo_local_paths(monkeypatch, tmp_path)
 
     monkeypatch.setattr(module.subprocess, "run", fail)
 
-    with pytest.raises(RuntimeError) as captured:
+    with pytest.raises(CapabilityUnavailable, match=r"OCR.*OcrProvider") as captured:
         module.MacOSVisionOcr().recognize(image)
 
     rendered = "".join(traceback.format_exception(captured.value))
     assert str(tmp_path) not in rendered
+
+
+def test_macos_provider_copy_failure_is_sanitized_and_actionable(monkeypatch, tmp_path):
+    module = importlib.import_module("chinese_exam_kit.extract.macos")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/swift")
+    image = tmp_path / "sensitive-page.png"
+    image.write_bytes(b"image fixture")
+
+    def fail_copy(*_):
+        raise OSError(f"cannot copy {image}")
+
+    monkeypatch.setattr(module.shutil, "copy2", fail_copy)
+
+    with pytest.raises(CapabilityUnavailable, match=r"OCR.*OcrProvider") as captured:
+        module.MacOSVisionOcr().recognize(image)
+
+    assert str(tmp_path) not in str(captured.value)
+
+
+def test_macos_provider_missing_output_is_sanitized_and_actionable(monkeypatch, tmp_path):
+    module = importlib.import_module("chinese_exam_kit.extract.macos")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/swift")
+    image = tmp_path / "sensitive-page.png"
+    image.write_bytes(b"image fixture")
+    monkeypatch.setattr(module.subprocess, "run", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(CapabilityUnavailable, match=r"OCR.*OcrProvider") as captured:
+        module.MacOSVisionOcr().recognize(image)
+
+    assert str(tmp_path) not in str(captured.value)
+
+
+def test_macos_provider_empty_output_is_treated_as_unavailable(monkeypatch, tmp_path):
+    module = importlib.import_module("chinese_exam_kit.extract.macos")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/swift")
+    image = tmp_path / "page.png"
+    image.write_bytes(b"image fixture")
+
+    def create_empty_output(command, **_kwargs):
+        command[3].write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(module.subprocess, "run", create_empty_output)
+
+    with pytest.raises(CapabilityUnavailable, match=r"OCR.*OcrProvider"):
+        module.MacOSVisionOcr().recognize(image)
+
+
+def test_macos_provider_output_read_failure_is_sanitized_and_actionable(monkeypatch, tmp_path):
+    module = importlib.import_module("chinese_exam_kit.extract.macos")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/swift")
+    image = tmp_path / "sensitive-page.png"
+    image.write_bytes(b"image fixture")
+    original_read_text = module.Path.read_text
+
+    def create_output(command, **_kwargs):
+        command[3].write_bytes(b"\xff")
+
+    def fail_for_output(path, *args, **kwargs):
+        if path.name == "ocr.md":
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", create_output)
+    monkeypatch.setattr(module.Path, "read_text", fail_for_output)
+
+    with pytest.raises(CapabilityUnavailable, match=r"OCR.*OcrProvider") as captured:
+        module.MacOSVisionOcr().recognize(image)
+
+    assert str(tmp_path) not in str(captured.value)

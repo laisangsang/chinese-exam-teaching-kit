@@ -111,6 +111,25 @@ def test_mixed_pdf_ocrs_only_sparse_pages_and_preserves_page_numbers(tmp_path):
     )
 
 
+def test_mixed_pdf_uses_rendered_filename_page_numbers_when_results_are_unordered(tmp_path):
+    source = tmp_path / "mixed.pdf"
+    source.write_bytes(b"public fixture")
+    first = tmp_path / "page-1.png"
+    second = tmp_path / "page-2.png"
+    first.write_bytes(b"first image")
+    second.write_bytes(b"second image")
+    dense = "1. " + "原创文本内容" * 20
+
+    result = extract_document(
+        source,
+        text_reader=lambda _: [dense, ""],
+        renderer=lambda *_: [second, first],
+        ocr=_LocalOcr(),
+    )
+
+    assert result.pages[1] == PageText(2, "2. 原创扫描页题目")
+
+
 def test_sparse_pdf_reports_missing_rendered_page(tmp_path):
     source = tmp_path / "scan.pdf"
     source.write_bytes(b"public fixture")
@@ -122,6 +141,34 @@ def test_sparse_pdf_reports_missing_rendered_page(tmp_path):
             source,
             text_reader=lambda _: ["", ""],
             renderer=lambda *_: [first_page],
+            ocr=_LocalOcr(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("image_names", "message"),
+    (
+        (("page-1.png", "page-1.jpg"), "重复页码 1"),
+        (("scan.png",), "无法识别页码"),
+        (("page-3.png",), "超出文档范围"),
+    ),
+)
+def test_sparse_pdf_rejects_ambiguous_rendered_page_numbers(tmp_path, image_names, message):
+    source = tmp_path / "scan.pdf"
+    source.write_bytes(b"public fixture")
+    images = []
+    for index, name in enumerate(image_names):
+        parent = tmp_path / str(index)
+        parent.mkdir()
+        image = parent / name
+        image.write_bytes(b"image fixture")
+        images.append(image)
+
+    with pytest.raises(ValueError, match=message):
+        extract_document(
+            source,
+            text_reader=lambda _: [""],
+            renderer=lambda *_: images,
             ocr=_LocalOcr(),
         )
 
