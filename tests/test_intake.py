@@ -53,6 +53,7 @@ def test_archive_inputs_is_idempotent_and_repairs_missing_or_corrupt_archives(tm
     assert destination.read_text(encoding="utf-8") == "可恢复材料"
     assert hashlib.sha256(destination.read_bytes()).hexdigest() == record.sha256
     assert repaired_corrupt.materials[0].duplicate_sources == (record.archived_path,)
+    assert not any(child.name.endswith(".partial") for child in layout.inputs.iterdir())
 
     legacy_record = replace(
         repaired_corrupt.materials[0],
@@ -63,32 +64,61 @@ def test_archive_inputs_is_idempotent_and_repairs_missing_or_corrupt_archives(tm
     assert normalized.materials[0].duplicate_sources == (record.archived_path,)
 
 
-def test_archive_digest_matches_bytes_when_source_would_change_between_hash_and_copy(
+def test_archive_digest_matches_final_bytes_and_source_is_read_only_once(
     tmp_path,
     monkeypatch,
 ):
     source = tmp_path / "paper.txt"
     source.write_bytes(b"before")
     layout, task = _new_task(tmp_path)
-    original_sha256_file = intake.sha256_file
-    source_mutated = False
+    original_open = Path.open
+    source_read_count = 0
 
-    def hash_then_mutate(path):
-        nonlocal source_mutated
-        digest = original_sha256_file(path)
-        if Path(path) == source and not source_mutated:
-            source.write_bytes(b"after")
-            source_mutated = True
-        return digest
+    def count_source_reads(path, mode="r", *args, **kwargs):
+        nonlocal source_read_count
+        if path == source and mode == "rb":
+            source_read_count += 1
+            if source_read_count > 1:
+                raise AssertionError("source file was read again to decide its digest")
+        return original_open(path, mode, *args, **kwargs)
 
-    monkeypatch.setattr(intake, "sha256_file", hash_then_mutate)
+    monkeypatch.setattr(Path, "open", count_source_reads)
 
     updated = archive_inputs(task, (source,))
     record = updated.materials[0]
     archived = layout.root / record.archived_path
 
+    assert source_read_count == 1
     assert record.sha256 == hashlib.sha256(archived.read_bytes()).hexdigest()
     assert record.size_bytes == archived.stat().st_size
+
+
+def test_failed_atomic_repair_keeps_existing_corrupt_target(tmp_path, monkeypatch):
+    source = tmp_path / "paper.txt"
+    source.write_bytes(b"correct source")
+    layout, task = _new_task(tmp_path)
+    archived_task = archive_inputs(task, (source,))
+    destination = layout.root / archived_task.materials[0].archived_path
+    corrupt_bytes = b"existing corrupt target"
+    destination.write_bytes(corrupt_bytes)
+    replace_calls = []
+
+    def fail_replace(staged, target):
+        replace_calls.append((Path(staged), Path(target)))
+        raise OSError("simulated atomic publish failure")
+
+    monkeypatch.setattr(intake.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="simulated atomic publish failure"):
+        archive_inputs(archived_task, (source,))
+
+    assert len(replace_calls) == 1
+    staged, target = replace_calls[0]
+    assert staged.parent == layout.inputs
+    assert target == destination
+    assert destination.read_bytes() == corrupt_bytes
+    assert not staged.exists()
+    assert not any(child.name.endswith(".partial") for child in layout.inputs.iterdir())
 
 
 def test_archive_copies_through_a_same_directory_temp_and_cleans_it_on_failure(

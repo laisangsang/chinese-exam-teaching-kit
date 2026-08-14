@@ -132,11 +132,7 @@ def _publish_staged_copy(
     destination: Path,
     digest: str,
 ) -> Literal["created", "repaired", "reused"]:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.is_symlink():
-        raise ValueError(f"archive destination cannot be a symlink: {destination}")
-    if not destination.resolve().is_relative_to(destination.parent.resolve()):
-        raise ValueError(f"archive destination escapes its parent: {destination}")
+    _validate_publish_destination(destination)
 
     replacing_corrupt = False
     if destination.exists():
@@ -144,16 +140,35 @@ def _publish_staged_copy(
             raise FileExistsError(f"归档目标已存在且不是普通文件: {destination}")
         if sha256_file(destination) == digest:
             return "reused"
-        destination.unlink()
         replacing_corrupt = True
 
-    try:
-        os.link(staged, destination)
-    except FileExistsError:
-        if destination.is_file() and not destination.is_symlink() and sha256_file(destination) == digest:
-            return "reused"
-        raise FileExistsError(f"归档目标被并发占用且内容不同: {destination}") from None
+    _validate_publish_destination(destination)
+    os.replace(staged, destination)
+    _fsync_directory(destination.parent)
     return "repaired" if replacing_corrupt else "created"
+
+
+def _validate_publish_destination(destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise ValueError(f"archive destination cannot be a symlink: {destination}")
+    if not destination.resolve().is_relative_to(destination.parent.resolve()):
+        raise ValueError(f"archive destination escapes its parent: {destination}")
+
+
+def _fsync_directory(directory: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        unsupported = {errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL)}
+        if error.errno not in unsupported:
+            raise
+    finally:
+        os.close(descriptor)
 
 
 def _ensure_archive_containment(workspace: Path, archive_dir: Path) -> None:
