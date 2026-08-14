@@ -145,6 +145,37 @@ def test_sparse_pdf_reports_missing_rendered_page(tmp_path):
         )
 
 
+def test_renderer_must_return_dense_pages_as_well_as_sparse_pages(tmp_path):
+    source = tmp_path / "mixed.pdf"
+    source.write_bytes(b"public fixture")
+    second = tmp_path / "page-2.png"
+    second.write_bytes(b"second image")
+    dense = "1. " + "原创文本内容" * 20
+
+    with pytest.raises(ValueError, match="缺少第 1 页"):
+        extract_document(
+            source,
+            text_reader=lambda _: [dense, ""],
+            renderer=lambda *_: [second],
+            ocr=_LocalOcr(),
+        )
+
+
+def test_renderer_rejects_missing_files_even_when_filename_has_a_valid_page(tmp_path):
+    source = tmp_path / "scan.pdf"
+    source.write_bytes(b"public fixture")
+
+    with pytest.raises(ValueError, match="不是可用文件") as captured:
+        extract_document(
+            source,
+            text_reader=lambda _: [""],
+            renderer=lambda *_: [tmp_path / "page-1.png"],
+            ocr=_LocalOcr(),
+        )
+
+    assert str(tmp_path) not in str(captured.value)
+
+
 @pytest.mark.parametrize(
     ("image_names", "message"),
     (
@@ -237,10 +268,13 @@ def test_question_candidates_keep_sections_pages_and_sequence_uncertainty():
 
 def test_extraction_artifacts_are_deterministic_and_contain_no_source_path(tmp_path):
     first_page_text = "一、信息类文本阅读\n1. 原创题目" + "原创内容" * 20
+    rendered_pages = [tmp_path / "page-1.png", tmp_path / "page-2.png"]
+    for image in rendered_pages:
+        image.write_bytes(b"image fixture")
     extraction = extract_document(
         tmp_path / "unused.pdf",
         text_reader=lambda _: [first_page_text, ""],
-        renderer=lambda *_: [tmp_path / "page-1.png", tmp_path / "page-2.png"],
+        renderer=lambda *_: rendered_pages,
         ocr=_LocalOcrForArtifacts(),
     )
     first = tmp_path / "first"

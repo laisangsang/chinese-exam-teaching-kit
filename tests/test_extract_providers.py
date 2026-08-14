@@ -140,3 +140,25 @@ def test_macos_provider_output_read_failure_is_sanitized_and_actionable(monkeypa
         module.MacOSVisionOcr().recognize(image)
 
     assert str(tmp_path) not in str(captured.value)
+
+
+def test_macos_provider_output_io_failure_is_sanitized_and_actionable(monkeypatch, tmp_path):
+    module = importlib.import_module("chinese_exam_kit.extract.macos")
+    monkeypatch.setattr(module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(module.shutil, "which", lambda _: "/usr/bin/swift")
+    image = tmp_path / "sensitive-page.png"
+    image.write_bytes(b"image fixture")
+
+    def create_output(command, **_kwargs):
+        command[3].write_text("原创识别结果", encoding="utf-8")
+
+    def fail_read(path, *args, **kwargs):
+        raise OSError(f"cannot read {path}")
+
+    monkeypatch.setattr(module.subprocess, "run", create_output)
+    monkeypatch.setattr(module.Path, "read_text", fail_read)
+
+    with pytest.raises(CapabilityUnavailable, match=r"OCR.*OcrProvider") as captured:
+        module.MacOSVisionOcr().recognize(image)
+
+    assert str(tmp_path) not in str(captured.value)

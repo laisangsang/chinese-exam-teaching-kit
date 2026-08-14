@@ -109,10 +109,6 @@ def extract_document(
     with tempfile.TemporaryDirectory(prefix="cekit-extract-") as temporary:
         images = tuple(render_pages(source, Path(temporary)))
         image_by_page = _rendered_pages_by_number(images, page_count=len(pages))
-        missing_pages = sorted(sparse - set(image_by_page))
-        if missing_pages:
-            rendered = "、".join(str(number) for number in missing_pages)
-            raise ValueError(f"渲染页数不足，无法识别第 {rendered} 页")
         extracted = tuple(
             PageText(page.number, ocr.recognize(image_by_page[page.number]))
             if page.number in sparse
@@ -257,6 +253,8 @@ def _rendered_pages_by_number(
     by_number: dict[int, Path] = {}
     for item in images:
         image = Path(item)
+        if not image.is_file():
+            raise ValueError("渲染结果包含不是可用文件的路径")
         match = RENDERED_PAGE_RE.fullmatch(image.stem)
         if match is None:
             raise ValueError("渲染结果包含无法识别页码的文件；文件名必须为 page-N")
@@ -266,6 +264,10 @@ def _rendered_pages_by_number(
         if number in by_number:
             raise ValueError(f"渲染结果包含重复页码 {number}")
         by_number[number] = image
+    missing = sorted(set(range(1, page_count + 1)) - set(by_number))
+    if missing:
+        rendered = "、".join(str(number) for number in missing)
+        raise ValueError(f"渲染结果缺少第 {rendered} 页")
     return by_number
 
 
