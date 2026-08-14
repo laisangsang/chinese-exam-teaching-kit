@@ -7,7 +7,13 @@ from chinese_exam_kit.cli import main
 def test_public_version_and_help(capsys):
     assert __version__ == "0.1.0"
     assert main(["--version"]) == 0
-    assert "cekit 0.1.0" in capsys.readouterr().out
+    assert f"cekit {__version__}" in capsys.readouterr().out
+
+
+def test_version_output_uses_the_imported_package_version(monkeypatch, capsys):
+    monkeypatch.setattr("chinese_exam_kit.cli.__version__", "0.1.1")
+    assert main(["--version"]) == 0
+    assert "cekit 0.1.1" in capsys.readouterr().out
 
 
 def test_gitignore_excludes_private_media_and_office_documents():

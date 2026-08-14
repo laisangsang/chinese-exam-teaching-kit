@@ -73,8 +73,10 @@ def inspect_environment() -> DoctorReport:
 
 def _redact(text: str) -> str:
     """Replace filesystem paths so reports are safe to share in issue trackers."""
-    text = re.sub(r"(?:[A-Za-z]:)?(?:/|\\\\)[^\s]+", "[redacted-path]", text)
-    return text
+    windows_path = r"(?<![\w.-])[A-Za-z]:\\(?:[^\\\r\n;]+\\)*[^\\\r\n;]+"
+    posix_path = r"(?<![\w.-])/(?:[^/\r\n;]+/)*[^/\r\n;]+"
+    text = re.sub(windows_path, "[redacted-path]", text)
+    return re.sub(posix_path, "[redacted-path]", text)
 
 
 def render_report(report: DoctorReport, redact: bool = True) -> str:

@@ -1,6 +1,7 @@
 import argparse
 import json
 
+from chinese_exam_kit import __version__
 from chinese_exam_kit.doctor import inspect_environment, render_report
 
 
@@ -13,7 +14,7 @@ def main(argv: list[str] | None = None) -> int:
     doctor_parser.add_argument("--report", action="store_true")
     args = parser.parse_args(argv)
     if args.version:
-        print("cekit 0.1.0")
+        print(f"cekit {__version__}")
     if args.command == "doctor":
         report = inspect_environment()
         if args.report:
