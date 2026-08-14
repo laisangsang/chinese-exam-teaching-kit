@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=70", "wheel>=0.43"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chinese-exam-teaching-kit"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["python-docx>=1.1.2,<2", "pypdf>=5,<7"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1.2,<2"]
+
+[project.scripts]
+cekit = "chinese_exam_kit.cli:main"
