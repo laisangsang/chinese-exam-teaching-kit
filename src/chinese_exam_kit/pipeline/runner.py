@@ -17,6 +17,7 @@ from chinese_exam_kit.content.docx import build_all
 from chinese_exam_kit.content.validate import validate_content_dir
 from chinese_exam_kit.delivery import (
     DeliveryManifest,
+    load_delivery_manifest,
     write_delivery_manifest,
 )
 from chinese_exam_kit.extract.documents import extract_document, write_extraction_artifacts
@@ -432,9 +433,20 @@ class PipelineRunner:
         manifest = task.workspace / "output" / "delivery.json"
         fingerprint = sha256_file(manifest)
         verification_path = task.workspace / "output" / "verification.json"
+        delivery_receipt = task.workspace / "output" / "delivery-receipt.json"
+        delivery_fingerprint = _content_fingerprint(task.workspace / "content")
 
         def record() -> None:
-            output_records = _manifest_output_records(self.project_root, manifest)
+            try:
+                output_records = _evidence_ready_delivery_outputs(
+                    self.project_root,
+                    workspace=task.workspace,
+                    manifest=manifest,
+                    delivery_receipt=delivery_receipt,
+                    delivery_fingerprint=delivery_fingerprint,
+                )
+            except (OSError, UnicodeError, ValueError):
+                raise ValueError("verification evidence contract is not satisfied") from None
             _atomic_json(
                 verification_path,
                 {
@@ -456,6 +468,9 @@ class PipelineRunner:
                 verification_path,
                 manifest,
                 fingerprint,
+                workspace=task.workspace,
+                delivery_receipt=delivery_receipt,
+                delivery_fingerprint=delivery_fingerprint,
             ),
         )
 
@@ -478,6 +493,13 @@ class PipelineRunner:
         save_task(task)
         try:
             action()
+            if current_validator is not None:
+                try:
+                    valid_output = current_validator()
+                except Exception:
+                    valid_output = False
+                if not valid_output:
+                    raise ValueError("stage output failed postcondition validation")
         except Exception:
             failed = transition_stage(task, stage, "failed")
             save_task(failed)
@@ -972,22 +994,51 @@ def _valid_analysis_artifact(
     )
 
 
-def _manifest_output_records(project_root: Path, manifest: Path) -> list[dict[str, str]]:
-    try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise ValueError("delivery manifest is unreadable") from None
-    outputs = payload.get("outputs") if isinstance(payload, dict) else None
-    if not isinstance(outputs, list) or not outputs:
-        raise ValueError("delivery manifest outputs are invalid")
+def _evidence_ready_delivery_outputs(
+    project_root: Path,
+    *,
+    workspace: Path,
+    manifest: Path,
+    delivery_receipt: Path,
+    delivery_fingerprint: str,
+) -> list[dict[str, str]]:
+    delivery = load_delivery_manifest(manifest)
+    if delivery.visual_status != "evidence_ready":
+        raise ValueError("delivery visual evidence is not ready")
+    output_records = _delivery_path_records(
+        project_root, delivery.outputs, field="output"
+    )
+    evidence_records = _delivery_path_records(
+        project_root, delivery.evidence, field="evidence"
+    )
+    expected_files = tuple(
+        Path(project_root) / record["path"]
+        for record in output_records + evidence_records
+    ) + (manifest,)
+    if not _valid_file_receipt(
+        delivery_receipt,
+        root=workspace,
+        fingerprint=delivery_fingerprint,
+        field="outputs",
+        expected_files=expected_files,
+    ):
+        raise ValueError("delivery artifacts do not match their receipt")
+    return output_records
+
+
+def _delivery_path_records(
+    project_root: Path, paths: Sequence[str], *, field: str
+) -> list[dict[str, str]]:
+    if not paths:
+        raise ValueError(f"delivery manifest {field} paths are empty")
     records = []
-    for raw in outputs:
+    for raw in paths:
         relative = _safe_relative_path(raw)
         if relative is None:
-            raise ValueError("delivery output path is unsafe")
+            raise ValueError(f"delivery {field} path is unsafe")
         path = _safe_existing_file(project_root, relative)
         if path is None:
-            raise ValueError("delivery output is missing or unsafe")
+            raise ValueError(f"delivery {field} is missing or unsafe")
         records.append({"path": relative, "sha256": sha256_file(path)})
     return records
 
@@ -997,13 +1048,22 @@ def _valid_verification(
     verification: Path,
     manifest: Path,
     manifest_fingerprint: str,
+    *,
+    workspace: Path,
+    delivery_receipt: Path,
+    delivery_fingerprint: str,
 ) -> bool:
     if verification.is_symlink() or not verification.is_file():
         return False
     try:
         payload = json.loads(verification.read_text(encoding="utf-8"))
-        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
-        delivery = DeliveryManifest.from_dict(manifest_payload)
+        output_records = _evidence_ready_delivery_outputs(
+            project_root,
+            workspace=workspace,
+            manifest=manifest,
+            delivery_receipt=delivery_receipt,
+            delivery_fingerprint=delivery_fingerprint,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
     except (TypeError, ValueError):
@@ -1021,15 +1081,11 @@ def _valid_verification(
         or payload.get("schema_version") != 1
         or payload.get("content_validation") != "passed"
         or payload.get("visual_review") != "evidence_ready"
-        or delivery.visual_status != "evidence_ready"
-        or payload.get("visual_review") != delivery.visual_status
         or payload.get("manifest_sha256") != manifest_fingerprint
+        or sha256_file(manifest) != manifest_fingerprint
     ):
         return False
-    try:
-        return payload.get("outputs") == _manifest_output_records(project_root, manifest)
-    except ValueError:
-        return False
+    return payload.get("outputs") == output_records
 
 
 def _safe_existing_file(root: Path, relative: str) -> Path | None:

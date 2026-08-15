@@ -45,6 +45,27 @@ def _docx_text(path: Path) -> str:
         return archive.read("word/document.xml").decode("utf-8")
 
 
+def _set_delivery_visual_status_and_sync_receipt(
+    task_path: Path, visual_status: str
+) -> None:
+    manifest = task_path.parent / "output" / "delivery.json"
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["visual_status"] = visual_status
+    if visual_status == "passed":
+        payload["reviewed_by"] = "伪造复核者"
+        payload["reviewed_at"] = "2026-08-15T12:00:00+08:00"
+    manifest.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    receipt = task_path.parent / "output" / "delivery-receipt.json"
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    manifest_record = next(
+        record
+        for record in receipt_payload["outputs"]
+        if record["path"] == "output/delivery.json"
+    )
+    manifest_record["sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    receipt.write_text(json.dumps(receipt_payload), encoding="utf-8")
+
+
 class UnavailableMediaProvider:
     def process(self, media_paths, output_dir):
         from chinese_exam_kit.media.learning import MediaLearningResult
@@ -552,6 +573,90 @@ def test_tampered_verification_visual_status_never_remains_completed(
     )
     assert repaired["visual_review"] == "evidence_ready"
     assert manifest["visual_status"] == repaired["visual_review"]
+
+
+@pytest.mark.parametrize("visual_status", ("failed", "passed", "unknown"))
+def test_non_evidence_ready_delivery_manifest_cannot_complete_verification(
+    tmp_path, visual_status
+):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    assert runner.resume(task_path).status == "completed"
+    verification = task_path.parent / "output" / "verification.json"
+    original_verification = verification.read_bytes()
+    before = load_task(task_path)
+    result_events = tuple(
+        event
+        for event in before.stages["verification"].events
+        if event.get("event") == "stage_result"
+    )
+    _set_delivery_visual_status_and_sync_receipt(task_path, visual_status)
+
+    with pytest.raises(ValueError, match="verification evidence contract"):
+        runner.resume(task_path)
+
+    failed = load_task(task_path)
+    assert failed.stages["verification"].status == "failed"
+    assert verification.read_bytes() == original_verification
+    assert tuple(
+        event
+        for event in failed.stages["verification"].events
+        if event.get("event") == "stage_result"
+    ) == result_events
+
+    with pytest.raises(ValueError, match="verification evidence contract"):
+        runner.resume(task_path)
+    assert verification.read_bytes() == original_verification
+
+
+def test_evidence_ready_delivery_verification_remains_idempotently_completed(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    assert runner.resume(task_path).status == "completed"
+    before = load_task(task_path).stages["verification"].events
+
+    assert runner.resume(task_path).status == "completed"
+
+    assert load_task(task_path).stages["verification"].events == before
+
+
+def test_verification_postcondition_rejects_a_corrupt_record(tmp_path, monkeypatch):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    assert runner.resume(task_path).status == "completed"
+    verification = task_path.parent / "output" / "verification.json"
+    verification.unlink()
+    before = load_task(task_path).stages["verification"].events
+    import chinese_exam_kit.pipeline.runner as runner_module
+
+    real_atomic_json = runner_module._atomic_json
+
+    def write_then_corrupt(destination, payload):
+        result = real_atomic_json(destination, payload)
+        if Path(destination).name == "verification.json":
+            corrupted = dict(payload)
+            corrupted["content_validation"] = "failed"
+            real_atomic_json(destination, corrupted)
+        return result
+
+    monkeypatch.setattr(runner_module, "_atomic_json", write_then_corrupt)
+
+    with pytest.raises(ValueError, match="postcondition validation"):
+        runner.resume(task_path)
+
+    failed = load_task(task_path)
+    assert failed.stages["verification"].status == "failed"
+    assert tuple(
+        event
+        for event in failed.stages["verification"].events[len(before) :]
+        if event.get("event") == "stage_result"
+    ) == ()
 
 
 def test_answer_attachment_recovers_without_duplicate_ledger_after_state_write_crash(
