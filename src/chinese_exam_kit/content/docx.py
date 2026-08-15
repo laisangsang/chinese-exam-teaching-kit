@@ -626,6 +626,20 @@ def _new_document(token: Mapping[str, Any]) -> DocumentObject:
     return doc
 
 
+def _cleanup_temporary(path: Path | None) -> None:
+    """Best-effort cleanup that cannot leak or override the build outcome."""
+
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        # Atomic replacement may already have removed the path. If it did not,
+        # preserving the primary, redacted write result is safer than exposing
+        # a temporary absolute path from cleanup.
+        return
+
+
 def build_one(
     source: Path,
     destination: Path,
@@ -658,8 +672,7 @@ def build_one(
     except OSError:
         raise OSError(f"could not write Word output: {destination.name}") from None
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        _cleanup_temporary(temporary)
     return destination
 
 

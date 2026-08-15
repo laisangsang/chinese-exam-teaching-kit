@@ -244,6 +244,56 @@ def test_atomic_write_failure_preserves_previous_docx_and_removes_partial(tmp_pa
     assert list(tmp_path.glob(".*.partial.docx")) == []
 
 
+def test_cleanup_failure_does_not_mask_atomic_write_failure_or_expose_path(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "guide.md"
+    source.write_text("# 新内容\n", encoding="utf-8")
+    destination = tmp_path / "guide.docx"
+    destination.write_bytes(b"old-word-file")
+
+    monkeypatch.setattr(
+        os,
+        "replace",
+        lambda source_path, destination_path: (_ for _ in ()).throw(
+            OSError(f"replace failed at {tmp_path}")
+        ),
+    )
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda path, **kwargs: (_ for _ in ()).throw(
+            OSError(f"cleanup failed at {tmp_path}")
+        ),
+    )
+
+    with pytest.raises(OSError, match="could not write Word output") as error:
+        build_one(source, destination, style_path=STYLE_PATH)
+
+    assert str(tmp_path) not in str(error.value)
+    assert destination.read_bytes() == b"old-word-file"
+    assert len(list(tmp_path.glob(".*.partial.docx"))) == 1
+
+
+def test_cleanup_failure_after_atomic_replace_does_not_misreport_success(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "guide.md"
+    source.write_text("# 已完成内容\n", encoding="utf-8")
+    destination = tmp_path / "guide.docx"
+
+    monkeypatch.setattr(
+        Path,
+        "unlink",
+        lambda path, **kwargs: (_ for _ in ()).throw(
+            OSError(f"cleanup failed at {tmp_path}")
+        ),
+    )
+
+    assert build_one(source, destination, style_path=STYLE_PATH) == destination
+    assert Document(destination).paragraphs[0].text == "已完成内容"
+
+
 def test_missing_source_error_is_path_redacted(tmp_path):
     source = tmp_path / "secret-student-name.md"
     with pytest.raises(FileNotFoundError) as error:

@@ -55,6 +55,12 @@ def test_manifest_rejects_scalar_path_iterables(value):
         DeliveryManifest(outputs=value)
 
 
+@pytest.mark.parametrize("value", ("tmp/page.png", b"tmp/page.png"))
+def test_automatic_manifest_rejects_scalar_evidence_before_status_inference(value):
+    with pytest.raises(ValueError, match="evidence.*iterable"):
+        DeliveryManifest.automatic(outputs=("guide.docx",), evidence=value)
+
+
 def test_manual_review_requires_signature_time_and_evidence():
     manifest = DeliveryManifest.automatic(
         outputs=("output/guide.docx",), evidence=("tmp/render/page-1.png",)
@@ -172,3 +178,28 @@ def test_manifest_loader_rejects_symlinked_parent_directory(tmp_path):
 
     with pytest.raises(ValueError, match="symlink"):
         load_delivery_manifest(linked_directory / path.name)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        [],
+        {},
+        {"schema_version": 1, "visual_status": "not_run"},
+        {"schema_version": 1, "visual_status": "not_run", "outputs": 42},
+        {
+            "schema_version": 1,
+            "visual_status": "evidence_ready",
+            "outputs": ["guide.docx"],
+            "evidence": 42,
+        },
+    ),
+)
+def test_manifest_loader_rejects_malformed_roots_and_fields_stably(tmp_path, payload):
+    path = tmp_path / "malformed.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="delivery manifest") as error:
+        load_delivery_manifest(path)
+
+    assert str(tmp_path) not in str(error.value)

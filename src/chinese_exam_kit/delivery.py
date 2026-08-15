@@ -17,8 +17,12 @@ VISUAL_STATUSES = frozenset({"not_run", "evidence_ready", "passed", "failed"})
 def _relative_paths(values: Iterable[str], *, field: str) -> tuple[str, ...]:
     if isinstance(values, (str, bytes)):
         raise ValueError(f"{field} paths must be a non-string iterable")
+    try:
+        iterator = iter(values)
+    except TypeError:
+        raise ValueError(f"{field} paths must be a non-string iterable") from None
     normalized: set[str] = set()
-    for raw in values:
+    for raw in iterator:
         if not isinstance(raw, str) or not raw or "\\" in raw:
             raise ValueError(f"{field} paths must be non-empty project-relative paths")
         path = PurePosixPath(raw)
@@ -106,6 +110,10 @@ class DeliveryManifest:
     def automatic(
         cls, *, outputs: Iterable[str], evidence: Iterable[str] = ()
     ) -> "DeliveryManifest":
+        if isinstance(outputs, (str, bytes)):
+            raise ValueError("output paths must be a non-string iterable")
+        if isinstance(evidence, (str, bytes)):
+            raise ValueError("evidence paths must be a non-string iterable")
         evidence_tuple = tuple(evidence)
         return cls(
             outputs=outputs,
@@ -154,6 +162,8 @@ class DeliveryManifest:
         if not isinstance(data, Mapping) or data.get("schema_version") != 1:
             raise ValueError("delivery manifest schema_version must be 1")
         status = data.get("visual_status")
+        if "outputs" not in data or not isinstance(status, str):
+            raise ValueError("delivery manifest requires outputs and visual_status")
         if status == "passed":
             if not allow_reviewed:
                 raise ValueError("passed records require the explicit manual review API")
@@ -164,15 +174,18 @@ class DeliveryManifest:
                     reviewed_by=data.get("reviewed_by"),
                     reviewed_at=data.get("reviewed_at"),
                 )
-            except (KeyError, TypeError, ValueError) as error:
-                raise ValueError("passed manifest requires a complete review record") from error
-        return cls(
-            outputs=data["outputs"],
-            visual_status=str(status),
-            evidence=data.get("evidence", ()),
-            reviewed_by=data.get("reviewed_by"),
-            reviewed_at=data.get("reviewed_at"),
-        )
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("passed manifest requires a complete review record") from None
+        try:
+            return cls(
+                outputs=data["outputs"],
+                visual_status=status,
+                evidence=data.get("evidence", ()),
+                reviewed_by=data.get("reviewed_by"),
+                reviewed_at=data.get("reviewed_at"),
+            )
+        except (TypeError, ValueError):
+            raise ValueError("delivery manifest fields are invalid") from None
 
 
 def mark_visual_review(
@@ -253,6 +266,8 @@ def load_delivery_manifest(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise ValueError(f"delivery manifest is unreadable: {path.name}") from None
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"delivery manifest root must be an object: {path.name}")
     manifest = DeliveryManifest._from_dict(
         payload, allow_reviewed=payload.get("visual_status") == "passed"
     )
