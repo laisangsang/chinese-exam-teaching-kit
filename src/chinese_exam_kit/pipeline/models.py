@@ -19,7 +19,9 @@ STAGES = (
     "knowledge_post",
     "verification",
 )
-STATUSES = frozenset({"pending", "running", "completed", "degraded", "failed"})
+STATUSES = frozenset(
+    {"pending", "running", "waiting", "completed", "degraded", "failed"}
+)
 
 
 def _freeze(value: Any) -> Any:

@@ -1,0 +1,318 @@
+import json
+import hashlib
+import socket
+from pathlib import Path
+
+import pytest
+
+from chinese_exam_kit.pipeline.answers import attach_reference_answers
+from chinese_exam_kit.pipeline.intake import archive_inputs
+from chinese_exam_kit.pipeline.models import PipelineTask
+from chinese_exam_kit.pipeline.runner import PipelineRunner
+from chinese_exam_kit.pipeline.state import load_task, save_task
+from chinese_exam_kit.workspace import WorkspaceLayout
+
+
+def _create_task(project: Path, *, media: bool = False) -> Path:
+    exam = project / "原创试卷.md"
+    exam.write_text("# 原创试卷\n\n1. 原创题目。\n", encoding="utf-8")
+    inputs = [exam]
+    if media:
+        video = project / "原创讲解.mp4"
+        video.write_bytes(b"local-media")
+        inputs.append(video)
+    layout = WorkspaceLayout.create(project, "original-demo")
+    task = PipelineTask.create("original-demo", "原创示例", layout.root)
+    return save_task(archive_inputs(task, inputs))
+
+
+def _write_valid_analysis(task_path: Path) -> Path:
+    content = task_path.parent / "content"
+    content.mkdir(parents=True, exist_ok=True)
+    source = content / "00_整卷总览与讲评建议.md"
+    source.write_text(
+        "# 原创试卷讲评总览\n\n本稿依据原创题面，供教师进行课堂讲评与迁移训练。\n",
+        encoding="utf-8",
+    )
+    return source
+
+
+class UnavailableMediaProvider:
+    def process(self, media_paths, output_dir):
+        from chinese_exam_kit.media.learning import MediaLearningResult
+
+        return MediaLearningResult.degraded("本地媒体工具不可用")
+
+
+def test_analysis_stage_pauses_with_agent_neutral_work_order(tmp_path):
+    task_path = _create_task(tmp_path)
+
+    summary = PipelineRunner(tmp_path).resume(task_path)
+
+    work_order = task_path.parent / "work_orders" / "analysis.md"
+    assert summary.status == "needs_user_input"
+    assert summary.stage("analysis").status == "waiting"
+    assert work_order.is_file()
+    text = work_order.read_text(encoding="utf-8")
+    assert "任何能够编辑文件的智能体" in text
+    assert "六个板块" in text
+    assert "Codex" not in text
+
+
+def test_valid_agent_authored_markdown_resumes_and_builds_delivery(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.run(task_path)
+    _write_valid_analysis(task_path)
+
+    summary = runner.resume(task_path)
+
+    assert summary.status == "completed"
+    assert summary.stage("analysis").status == "completed"
+    assert summary.stage("delivery").status == "completed"
+    assert (task_path.parent / "output" / "docx" / "00_整卷总览与讲评建议.docx").is_file()
+    manifest = json.loads((task_path.parent / "output" / "delivery.json").read_text(encoding="utf-8"))
+    assert manifest["visual_status"] == "evidence_ready"
+    assert all(not Path(item).is_absolute() for item in manifest["outputs"] + manifest["evidence"])
+
+
+def test_resume_is_idempotent_for_completed_stages_and_artifacts(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    runner.resume(task_path)
+    first = load_task(task_path).to_dict()
+    output = task_path.parent / "output" / "docx" / "00_整卷总览与讲评建议.docx"
+    first_mtime = output.stat().st_mtime_ns
+
+    runner.resume(task_path)
+
+    assert load_task(task_path).to_dict() == first
+    assert output.stat().st_mtime_ns == first_mtime
+
+
+def test_changed_analysis_invalidates_completed_delivery_and_waits_for_repair(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    source = _write_valid_analysis(task_path)
+    assert runner.resume(task_path).status == "completed"
+
+    source.write_text("TODO\n", encoding="utf-8")
+    summary = runner.resume(task_path)
+
+    assert summary.status == "needs_user_input"
+    assert summary.stage("analysis").status == "waiting"
+    assert load_task(task_path).stages["delivery"].status == "pending"
+
+
+def test_running_stage_recovers_after_completion_write_crash(tmp_path, monkeypatch):
+    task_path = _create_task(tmp_path)
+    import chinese_exam_kit.pipeline.runner as runner_module
+
+    real_save = runner_module.save_task
+    failed = False
+
+    def crash_once(task):
+        nonlocal failed
+        if not failed and task.stages["extract"].status == "completed":
+            failed = True
+            raise OSError("simulated crash")
+        return real_save(task)
+
+    monkeypatch.setattr(runner_module, "save_task", crash_once)
+    with pytest.raises(OSError, match="simulated crash"):
+        PipelineRunner(tmp_path).resume(task_path)
+    assert load_task(task_path).stages["extract"].status == "running"
+
+    monkeypatch.setattr(runner_module, "save_task", real_save)
+    summary = PipelineRunner(tmp_path).resume(task_path)
+
+    assert summary.stage("extract").status == "completed"
+    assert summary.stage("analysis").status == "waiting"
+
+
+def test_missing_video_tools_degrades_without_blocking_exam(tmp_path):
+    task_path = _create_task(tmp_path, media=True)
+    summary = PipelineRunner(tmp_path, media_provider=UnavailableMediaProvider()).resume(task_path)
+
+    assert summary.stage("media").status == "degraded"
+    assert summary.stage("analysis").status == "waiting"
+    assert summary.status == "needs_user_input"
+
+
+def test_media_receipt_prevents_duplicate_provider_work_after_state_write_crash(
+    tmp_path, monkeypatch
+):
+    task_path = _create_task(tmp_path, media=True)
+    calls = 0
+
+    class CountingProvider:
+        def process(self, media_paths, output_dir):
+            nonlocal calls
+            calls += 1
+            from chinese_exam_kit.media.learning import MediaLearningResult
+
+            return MediaLearningResult.completed()
+
+    import chinese_exam_kit.pipeline.runner as runner_module
+
+    real_save = runner_module.save_task
+    failed = False
+
+    def fail_media_completion_once(task):
+        nonlocal failed
+        if not failed and task.stages["media"].status == "completed":
+            failed = True
+            raise OSError("simulated media state crash")
+        return real_save(task)
+
+    monkeypatch.setattr(runner_module, "save_task", fail_media_completion_once)
+    with pytest.raises(OSError, match="simulated media state crash"):
+        PipelineRunner(tmp_path, media_provider=CountingProvider()).resume(task_path)
+
+    monkeypatch.setattr(runner_module, "save_task", real_save)
+    PipelineRunner(tmp_path, media_provider=CountingProvider()).resume(task_path)
+
+    assert calls == 1
+
+
+def test_attaching_new_answers_invalidates_dependents_but_never_media(tmp_path):
+    task_path = _create_task(tmp_path, media=True)
+    runner = PipelineRunner(tmp_path, media_provider=UnavailableMediaProvider())
+    runner.resume(task_path)
+    before = load_task(task_path)
+    media_events = before.stages["media"].events
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. A。\n", encoding="utf-8")
+
+    changed = attach_reference_answers(task_path, [answer])
+    duplicate = attach_reference_answers(task_path, [answer])
+
+    assert changed.changed is True
+    assert duplicate.changed is False
+    updated = load_task(task_path)
+    assert updated.stages["media"].events == media_events
+    assert updated.stages["media"].status == "degraded"
+    for name in ("extract", "knowledge_pre", "analysis", "delivery", "knowledge_post", "verification"):
+        assert updated.stages[name].status == "pending"
+    ledger = json.loads((task_path.parent / "answers" / "differences.json").read_text(encoding="utf-8"))
+    assert len(ledger["versions"]) == 1
+    assert str(answer) not in json.dumps(ledger, ensure_ascii=False)
+
+    intake_events = updated.stages["intake"].events
+    runner.resume(task_path)
+    resumed = load_task(task_path)
+    assert resumed.stages["intake"].events == intake_events
+    assert resumed.stages["media"].events == media_events
+
+
+def test_answer_attachment_recovers_without_duplicate_ledger_after_state_write_crash(
+    tmp_path, monkeypatch
+):
+    task_path = _create_task(tmp_path)
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. B。\n", encoding="utf-8")
+    import chinese_exam_kit.pipeline.answers as answers_module
+
+    real_save = answers_module.save_task
+
+    def fail_save(task):
+        raise OSError("simulated state write crash")
+
+    monkeypatch.setattr(answers_module, "save_task", fail_save)
+    with pytest.raises(OSError, match="simulated state write crash"):
+        attach_reference_answers(task_path, [answer])
+
+    monkeypatch.setattr(answers_module, "save_task", real_save)
+    result = attach_reference_answers(task_path, [answer])
+    ledger = json.loads((task_path.parent / "answers" / "differences.json").read_text(encoding="utf-8"))
+
+    assert result.changed is True
+    assert len(ledger["versions"]) == 1
+    assert load_task(task_path).materials[-1].material_type == "answer_candidate"
+
+
+def test_answer_attachment_snapshots_previous_markdown_and_word_for_traceability(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    source = _write_valid_analysis(task_path)
+    runner.resume(task_path)
+    original_markdown = source.read_bytes()
+    original_docx = (
+        task_path.parent / "output" / "docx" / "00_整卷总览与讲评建议.docx"
+    ).read_bytes()
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. C。\n", encoding="utf-8")
+
+    attachment = attach_reference_answers(task_path, [answer])
+    revision = task_path.parent / "answers" / "revisions" / attachment.added_sha256[0][:16]
+    manifest = json.loads((revision / "snapshot.json").read_text(encoding="utf-8"))
+
+    assert (revision / "content" / source.name).read_bytes() == original_markdown
+    assert (
+        revision / "output" / "docx" / "00_整卷总览与讲评建议.docx"
+    ).read_bytes() == original_docx
+    assert all(not Path(item["path"]).is_absolute() for item in manifest["artifacts"])
+    assert str(tmp_path) not in json.dumps(manifest, ensure_ascii=False)
+
+
+def test_answer_snapshot_rejects_nested_symlink_escape(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    runner.resume(task_path)
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. D。\n", encoding="utf-8")
+    digest = hashlib.sha256(answer.read_bytes()).hexdigest()
+    revision = task_path.parent / "answers" / "revisions" / digest[:16]
+    revision.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (revision / "output").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink|unsafe"):
+        attach_reference_answers(task_path, [answer])
+
+    assert not any(outside.iterdir())
+
+
+def test_runner_rejects_task_symlink_escape(tmp_path):
+    task_path = _create_task(tmp_path)
+    outside = tmp_path / "outside-task.json"
+    outside.write_bytes(task_path.read_bytes())
+    link = task_path.parent / "linked-task.json"
+    link.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="task.json|symlink"):
+        PipelineRunner(tmp_path).resume(link)
+
+
+def test_runner_rejects_preexisting_pipeline_lock_symlink(tmp_path):
+    task_path = _create_task(tmp_path)
+    outside = tmp_path / "outside-lock"
+    outside.write_text("do not touch", encoding="utf-8")
+    (task_path.parent / ".pipeline.lock").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="lock.*symlink"):
+        PipelineRunner(tmp_path).resume(task_path)
+
+    assert outside.read_text(encoding="utf-8") == "do not touch"
+
+
+def test_pipeline_has_no_network_or_git_side_effects(tmp_path, monkeypatch):
+    task_path = _create_task(tmp_path)
+    git_sentinel = tmp_path / ".git" / "sentinel"
+    git_sentinel.parent.mkdir()
+    git_sentinel.write_text("unchanged", encoding="utf-8")
+
+    def reject_network(*args, **kwargs):
+        raise AssertionError("network access is forbidden")
+
+    monkeypatch.setattr(socket, "create_connection", reject_network)
+    PipelineRunner(tmp_path).resume(task_path)
+
+    assert git_sentinel.read_text(encoding="utf-8") == "unchanged"

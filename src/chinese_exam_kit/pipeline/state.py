@@ -13,8 +13,9 @@ from .models import PipelineTask, STAGES, StageRecord
 
 
 ALLOWED_STAGE_TRANSITIONS = {
-    "pending": frozenset({"running"}),
-    "running": frozenset({"completed", "degraded", "failed"}),
+    "pending": frozenset({"running", "waiting"}),
+    "running": frozenset({"waiting", "completed", "degraded", "failed"}),
+    "waiting": frozenset({"running"}),
     "failed": frozenset({"running"}),
     "degraded": frozenset({"running", "completed"}),
     "completed": frozenset({"running"}),
