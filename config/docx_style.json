@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "preset_name": "compact_reference_guide",
+  "named_override": "teacher_guide_a4",
+  "cover_pattern": "editorial_cover_restrained",
+  "page": {
+    "width_dxa": 11906,
+    "height_dxa": 16838,
+    "margins_dxa": {
+      "top": 1247,
+      "right": 1361,
+      "bottom": 1247,
+      "left": 1361
+    },
+    "header_footer_distance_dxa": 709,
+    "content_width_dxa": 9184
+  },
+  "fonts": {
+    "cjk_body": [
+      "Noto Sans CJK SC",
+      "Microsoft YaHei",
+      "PingFang SC",
+      "SimSun"
+    ],
+    "cjk_heading": [
+      "Noto Sans CJK SC",
+      "Microsoft YaHei",
+      "PingFang SC",
+      "SimHei"
+    ],
+    "latin": [
+      "Arial",
+      "Liberation Sans"
+    ]
+  },
+  "body": {
+    "size_pt": 11,
+    "before_pt": 0,
+    "after_pt": 6,
+    "line_spacing": 1.25
+  },
+  "title": {
+    "size_pt": 24,
+    "before_pt": 14,
+    "after_pt": 18,
+    "color": "203748"
+  },
+  "headings": {
+    "h1": {
+      "size_pt": 16,
+      "before_pt": 18,
+      "after_pt": 10,
+      "color": "2E74B5"
+    },
+    "h2": {
+      "size_pt": 13,
+      "before_pt": 14,
+      "after_pt": 7,
+      "color": "2E74B5"
+    },
+    "h3": {
+      "size_pt": 12,
+      "before_pt": 10,
+      "after_pt": 5,
+      "color": "1F4D78"
+    }
+  },
+  "list": {
+    "marker_aligned_dxa": 269,
+    "text_indent_dxa": 540,
+    "hanging_dxa": 271,
+    "level_step_dxa": 360,
+    "after_pt": 4,
+    "line_spacing": 1.25
+  },
+  "table": {
+    "width_dxa": 9064,
+    "indent_dxa": 120,
+    "cell_margins_dxa": {
+      "top": 100,
+      "start": 120,
+      "bottom": 100,
+      "end": 120
+    },
+    "header_fill": "E8EEF5",
+    "border_color": "B8C5D1",
+    "cell_line_spacing": 1.15,
+    "cell_after_pt": 2
+  },
+  "colors": {
+    "body": "202F3D",
+    "muted": "687684",
+    "rule": "CAD6E2",
+    "official_fill": "EDF4FA",
+    "official_border": "2E74B5",
+    "official_text": "1F3A5F",
+    "inference_fill": "F5F8FB",
+    "inference_border": "7189A3",
+    "inference_text": "202F3D",
+    "extension_fill": "FFF8E8",
+    "extension_border": "D2A833",
+    "extension_text": "7A5A00",
+    "code_fill": "F2F4F7",
+    "code_text": "7A3E00"
+  }
+}
