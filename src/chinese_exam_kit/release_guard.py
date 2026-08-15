@@ -13,6 +13,7 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
+from urllib.parse import unquote, urlsplit
 
 
 _MAX_TEXT_SCAN_BYTES = 2 * 1024 * 1024
@@ -664,6 +665,7 @@ def _scan_text(
 
 
 def _contains_absolute_path(text: str) -> bool:
+    text = _mask_safe_path_contexts(text)
     file_prefix = "file" + ":"
     if re.search(re.escape(file_prefix) + r"[\\/]{1,3}", text, flags=re.IGNORECASE):
         return True
@@ -684,7 +686,6 @@ def _contains_absolute_path(text: str) -> bool:
     candidate_pattern = re.compile(
         r"(?<![\w:/.-])/(?!/)([A-Za-z0-9_\u3400-\u9fff.~+-][^\s'\"<>()\[\]{}]*)"
     )
-    markdown_roots = {"api", "assets", "docs", "help", "images", "static"}
     safe_system_prefixes = {
         ("bin", "bash"),
         ("bin", "sh"),
@@ -713,15 +714,6 @@ def _contains_absolute_path(text: str) -> bool:
         parts = [part for part in candidate.split("/") if part]
         if not parts:
             continue
-        is_markdown_root = (
-            parts[0] in markdown_roots
-            and match.start() > 0
-            and text[match.start() - 1] == "("
-        )
-        if is_markdown_root:
-            continue
-        if match.start() > 0 and text[match.start() - 1] == ">":
-            continue
         if any(tuple(parts[: len(prefix)]) == prefix for prefix in safe_system_prefixes):
             continue
         context = text[max(0, match.start() - 32) : match.start()]
@@ -731,12 +723,103 @@ def _contains_absolute_path(text: str) -> bool:
                 context,
             )
         )
-        if parts[0] in known_filesystem_roots or len(parts) >= 2 or field_context:
+        markdown_context = bool(re.search(r"\]\(\s*$", context))
+        shell_redirect = bool(re.search(r"(?:\d*>|<)\s*$", context))
+        if (
+            parts[0] in known_filesystem_roots
+            or len(parts) >= 2
+            or field_context
+            or markdown_context
+            or shell_redirect
+            or "\\" in candidate
+        ):
             return True
     return False
 
 
+def _mask_safe_path_contexts(text: str) -> str:
+    masked = [False] * len(text)
+    web_url = re.compile(r"(?i)\bht" + r"tps?://[^\s<>\"']+")
+    for match in web_url.finditer(text):
+        candidate = match.group(0)
+        end = match.end()
+        while candidate and candidate[-1] in ".,;!?)]}":
+            candidate = candidate[:-1]
+            end -= 1
+        try:
+            parsed = urlsplit(candidate)
+            hostname = parsed.hostname or ""
+        except ValueError:
+            continue
+        if parsed.scheme.casefold() not in {"http", "https"} or not re.fullmatch(
+            r"[A-Za-z0-9.-]+|[A-Fa-f0-9:]+", hostname
+        ):
+            continue
+        masked[match.start() : end] = [True] * (end - match.start())
+
+    documented_placeholder = re.compile(
+        r"<[A-Za-z][A-Za-z0-9_-]*>/[A-Za-z0-9._~+/-]+"
+    )
+    for match in documented_placeholder.finditer(text):
+        masked[match.start() : match.end()] = [True] * (match.end() - match.start())
+
+    markdown_link = re.compile(
+        r"!?\[[^\]\r\n]*\]\(\s*([^\s)]+)(?:\s+[^)\r\n]*)?\)"
+    )
+    for match in markdown_link.finditer(text):
+        destination = match.group(1)
+        if _safe_markdown_root_destination(destination):
+            start, end = match.span(1)
+            masked[start:end] = [True] * (end - start)
+    return "".join(" " if hidden else character for character, hidden in zip(text, masked))
+
+
+def _safe_markdown_root_destination(destination: str) -> bool:
+    if not destination.startswith("/") or destination.startswith("//"):
+        return False
+    if "\\" in destination or any(
+        unicodedata.category(character) == "Cf" for character in destination
+    ):
+        return False
+    path = destination.split("#", 1)[0].split("?", 1)[0]
+    decoded = unquote(path)
+    if not decoded.startswith("/") or unicodedata.normalize("NFC", decoded) != decoded:
+        return False
+    parts = tuple(part for part in decoded[1:].split("/") if part)
+    if not parts or any(part in {".", ".."} for part in parts):
+        return False
+    allowed_roots = {
+        ".codebuddy",
+        ".github",
+        "agent-guides",
+        "config",
+        "docs",
+        "knowledge",
+        "scripts",
+        "src",
+        "templates",
+        "tests",
+    }
+    public_site_roots = {"api", "assets", "help", "images", "static"}
+    if parts[0] in allowed_roots or parts[0] in public_site_roots:
+        return True
+    if parts[0] == "examples":
+        return len(parts) >= 2 and parts[1] == "original-mini-exam"
+    return bool(
+        len(parts) == 1
+        and (
+            parts[0] in set(_string_values(_DEFAULT_POLICY["allowed_root_files"]))
+            or re.fullmatch(r"README(?:\.[A-Za-z0-9_-]+)?\.md", parts[0])
+        )
+    )
+
+
 def _contains_secret(text: str) -> bool:
+    web_userinfo = re.compile(
+        r"(?i)\bht" + r"tps?://[^\s/:@]+:[^\s/@]+@"
+    )
+    if web_userinfo.search(text):
+        return True
     assignment = re.compile(
         r"(?i)\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|"
         r"aws[_-]?secret[_-]?access[_-]?key|connection[_-]?string|private[_-]?key)\b"

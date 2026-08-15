@@ -661,3 +661,89 @@ def test_staged_policy_cannot_be_hidden_by_a_safe_worktree_policy(tmp_path):
     issues = audit_repository(tmp_path)
 
     assert {"config_invalid", "forbidden_path"} <= _codes(issues)
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    (
+        "[示例](/examples/original-mini-exam/README.md)",
+        "[源码](/src/chinese_exam_kit/cli.py)",
+        "![图示](/docs/assets/example.svg)",
+    ),
+)
+def test_valid_markdown_public_root_destinations_are_not_host_paths(
+    tmp_path, markdown
+):
+    _write(tmp_path, "docs/links.md", markdown)
+
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "destination",
+    (
+        _generic_posix("docs", "..", "materials", "private.md"),
+        _generic_posix("examples", "borrowed", "exam.md"),
+        _generic_posix("Users", "person-a", "private.md"),
+        _generic_posix("src") + "\\" + "outside.py",
+    ),
+)
+def test_unsafe_markdown_root_destinations_remain_blocked(tmp_path, destination):
+    _write(tmp_path, "docs/links.md", "[不安全](" + destination + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+def test_http_urls_are_masked_before_drive_and_path_detection(tmp_path):
+    url = "https://example.com/" + "C:" + "/guide"
+    _write(tmp_path, "docs/url.md", "See " + url + " and https://example.org/a/b.")
+
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/url.md",))
+    )
+
+
+def test_http_url_userinfo_credential_is_still_blocked_as_a_secret(tmp_path):
+    url = "https://" + "person:" + "a" * 24 + "@" + "example.com/docs"
+    _write(tmp_path, "docs/url.md", url)
+
+    issues = audit_repository(tmp_path, tracked=("docs/url.md",))
+
+    assert "absolute_path" not in _codes(issues)
+    assert "secret_pattern" in _codes(issues)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "command >" + _generic_posix("Users", "person-a", "private.txt"),
+        "command 2>" + _generic_posix("tmp", "error.log"),
+        "command < " + _generic_posix("data", "input"),
+    ),
+)
+def test_shell_redirection_absolute_paths_are_blocked(tmp_path, command):
+    _write(tmp_path, "docs/shell.md", command)
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/shell.md",))
+    )
+
+
+def test_blockquote_text_and_relative_links_are_safe_but_quoted_paths_are_not(
+    tmp_path,
+):
+    safe = "> 普通文字\n\n[相对链接](../guide.md)\n"
+    _write(tmp_path, "docs/quote.md", safe)
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/quote.md",))
+    )
+
+    quoted_path = "> " + _generic_posix("Users", "person-a", "private.md")
+    _write(tmp_path, "docs/quote.md", quoted_path)
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/quote.md",))
+    )
