@@ -27,8 +27,13 @@ from chinese_exam_kit.pipeline.state import load_task, save_task
 from chinese_exam_kit.workspace import WorkspaceLayout
 
 
+class _SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        self.exit(2, "cekit: 参数无效\n")
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cekit")
+    parser = _SafeArgumentParser(prog="cekit")
     parser.add_argument("--version", action="store_true")
     commands = parser.add_subparsers(dest="command")
 
@@ -113,11 +118,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         parser.print_help()
         return 0
-    except (ValueError, FileNotFoundError, UnicodeError) as error:
-        print(f"输入错误：{_redacted_message(error)}", file=sys.stderr)
+    except (ValueError, FileNotFoundError, UnicodeError):
+        print("输入错误：参数或项目内文件状态无效。", file=sys.stderr)
         return 2
-    except Exception as error:
-        print(f"内部错误：{_redacted_message(error)}", file=sys.stderr)
+    except Exception:
+        print("内部错误：本地处理失败，请检查环境与文件权限。", file=sys.stderr)
         return 1
 
 
@@ -168,25 +173,26 @@ def _task_content(root: Path, task_value: str) -> Path:
 
 def _relative_input(root: Path, value: str) -> Path:
     candidate = Path(value)
-    if candidate.is_absolute():
-        try:
-            candidate.relative_to(root)
-        except ValueError:
-            raise ValueError("路径必须位于当前项目内") from None
-    else:
+    if ".." in candidate.parts:
+        raise ValueError("路径必须位于当前项目内")
+    if not candidate.is_absolute():
         candidate = root / candidate
     absolute = candidate.absolute()
-    if any(
-        path.is_symlink()
-        for path in (absolute, *absolute.parents)
-        if path != root.parent
-    ):
-        raise ValueError("路径不得使用符号链接")
+    cursor = absolute
     try:
-        absolute.relative_to(root)
-    except ValueError:
+        while True:
+            if cursor.is_symlink():
+                raise ValueError("路径不得使用符号链接")
+            if cursor.resolve(strict=False) == root:
+                break
+            if cursor.parent == cursor:
+                break
+            cursor = cursor.parent
+        resolved = absolute.resolve(strict=False)
+        resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
         raise ValueError("路径必须位于当前项目内") from None
-    return absolute
+    return resolved
 
 
 def _relative_output(root: Path, value: str) -> Path:
@@ -232,9 +238,3 @@ def _status_text(summary, task_path: str) -> str:
     lines = [f"任务：{task_path}", f"状态：{summary.status}"]
     lines.extend(f"- {name}: {summary.stage(name).status}" for name in summary.stages)
     return "\n".join(lines)
-
-
-def _redacted_message(error: Exception) -> str:
-    message = str(error).strip() or error.__class__.__name__
-    message = re.sub(r"(?:[A-Za-z]:[\\/]|/)[^\s，。；:]+", "<path>", message)
-    return message

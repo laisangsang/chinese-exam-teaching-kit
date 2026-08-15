@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 from dataclasses import dataclass, replace
@@ -31,8 +32,16 @@ def attach_reference_answers(
     task_path: Path, answer_paths: Sequence[Path]
 ) -> AnswerAttachment:
     """Copy and deduplicate new answers, retaining a path-safe revision ledger."""
-    if not answer_paths:
+    if isinstance(answer_paths, (str, bytes)):
+        raise TypeError("answer paths must be an iterable of path-like values")
+    try:
+        supplied_paths = tuple(answer_paths)
+    except TypeError:
+        raise TypeError("answer paths must be an iterable of path-like values") from None
+    if not supplied_paths:
         raise ValueError("at least one reference answer is required")
+    if any(not isinstance(path, os.PathLike) for path in supplied_paths):
+        raise TypeError("answer paths must contain only path-like values")
     raw = Path(task_path)
     absolute = raw if raw.is_absolute() else Path.cwd() / raw
     if len(absolute.parts) < 5:
@@ -42,9 +51,10 @@ def attach_reference_answers(
     with task_lock(safe_path.parent):
         task = load_task(safe_path)
         known = {record.sha256 for record in task.materials}
-        archived = archive_inputs(task, tuple(Path(path) for path in answer_paths))
+        archived = archive_inputs(task, tuple(Path(path) for path in supplied_paths))
         added = tuple(record.sha256 for record in archived.materials if record.sha256 not in known)
         if not added:
+            _write_current_revision(task)
             ledger = _load_ledger(task.workspace / "answers" / "differences.json")
             return AnswerAttachment(False, (), len(ledger["versions"]))
 
@@ -81,6 +91,7 @@ def attach_reference_answers(
                 },
             ),
         )
+        _write_current_revision(updated)
 
         ledger_path = task.workspace / "answers" / "differences.json"
         ledger = _load_ledger(ledger_path)
@@ -125,6 +136,24 @@ def _load_ledger(path: Path) -> dict[str, object]:
     ):
         raise ValueError("answer difference ledger is invalid")
     return payload
+
+
+def _write_current_revision(task: PipelineTask) -> str | None:
+    digests = tuple(
+        sorted(
+            record.sha256
+            for record in task.materials
+            if record.material_type == "answer_candidate"
+        )
+    )
+    if not digests:
+        return None
+    token = hashlib.sha256("\n".join(digests).encode("utf-8")).hexdigest()
+    _atomic_json(
+        task.workspace / "answers" / "current_revision.json",
+        {"schema_version": 1, "token": token, "answer_sha256": list(digests)},
+    )
+    return token
 
 
 def _snapshot_previous_outputs(task: PipelineTask, answer_digest: str) -> str:

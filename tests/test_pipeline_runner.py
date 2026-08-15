@@ -1,6 +1,9 @@
 import json
 import hashlib
+import errno
+import os
 import socket
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -35,6 +38,11 @@ def _write_valid_analysis(task_path: Path) -> Path:
         encoding="utf-8",
     )
     return source
+
+
+def _docx_text(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        return archive.read("word/document.xml").decode("utf-8")
 
 
 class UnavailableMediaProvider:
@@ -105,6 +113,27 @@ def test_changed_analysis_invalidates_completed_delivery_and_waits_for_repair(tm
     assert summary.status == "needs_user_input"
     assert summary.stage("analysis").status == "waiting"
     assert load_task(task_path).stages["delivery"].status == "pending"
+
+
+def test_stage_currentness_uses_latest_result_when_content_returns_a_to_b_to_a(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    source = _write_valid_analysis(task_path)
+    source.write_text("# 版本A\n\n这是通过校验的原创版本A内容。\n", encoding="utf-8")
+    runner.resume(task_path)
+    output = task_path.parent / "output" / "docx" / "00_整卷总览与讲评建议.docx"
+    assert "版本A" in _docx_text(output)
+
+    source.write_text("# 版本B\n\n这是通过校验的原创版本B内容。\n", encoding="utf-8")
+    runner.resume(task_path)
+    assert "版本B" in _docx_text(output)
+    source.write_text("# 版本A\n\n这是通过校验的原创版本A内容。\n", encoding="utf-8")
+
+    runner.resume(task_path)
+
+    assert "版本A" in _docx_text(output)
+    assert "版本B" not in _docx_text(output)
 
 
 def test_running_stage_recovers_after_completion_write_crash(tmp_path, monkeypatch):
@@ -178,6 +207,108 @@ def test_media_receipt_prevents_duplicate_provider_work_after_state_write_crash(
     assert calls == 1
 
 
+def test_missing_media_index_forces_only_media_rebuild(tmp_path):
+    task_path = _create_task(tmp_path, media=True)
+    calls = 0
+
+    class CountingProvider:
+        def process(self, media_paths, output_dir):
+            nonlocal calls
+            calls += 1
+            from chinese_exam_kit.media.learning import MediaLearningResult
+
+            return MediaLearningResult.degraded("本地能力不可用")
+
+    runner = PipelineRunner(tmp_path, media_provider=CountingProvider())
+    runner.resume(task_path)
+    extract_events = load_task(task_path).stages["extract"].events
+    (task_path.parent / "media" / "index.json").unlink()
+
+    runner.resume(task_path)
+
+    assert calls == 2
+    assert load_task(task_path).stages["extract"].events == extract_events
+
+
+def test_missing_extract_artifact_is_rebuilt_without_repeating_intake(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    task = load_task(task_path)
+    intake_events = task.stages["intake"].events
+    artifact = next((task_path.parent / "artifacts" / "extract").rglob("question_text.md"))
+    artifact.unlink()
+
+    runner.resume(task_path)
+
+    assert artifact.is_file()
+    assert load_task(task_path).stages["intake"].events == intake_events
+
+
+def test_extract_receipt_never_trusts_artifacts_reached_through_nested_symlink(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    task = load_task(task_path)
+    digest_dir = task_path.parent / "artifacts" / "extract" / task.materials[0].sha256[:16]
+    outside = tmp_path / "outside-extract"
+    digest_dir.rename(outside)
+    digest_dir.symlink_to(outside, target_is_directory=True)
+    before = {path.name: path.read_bytes() for path in outside.iterdir()}
+
+    with pytest.raises(ValueError, match="extract.*symlink"):
+        runner.resume(task_path)
+
+    assert {path.name: path.read_bytes() for path in outside.iterdir()} == before
+    assert load_task(task_path).stages["extract"].status == "failed"
+
+
+def test_missing_knowledge_audits_are_rebuilt_at_their_own_stages(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    pre = task_path.parent / "knowledge" / "pre_audit.json"
+    pre.unlink()
+
+    runner.resume(task_path)
+    assert pre.is_file()
+    _write_valid_analysis(task_path)
+    runner.resume(task_path)
+    post = task_path.parent / "knowledge" / "post_audit.json"
+    post.unlink()
+
+    runner.resume(task_path)
+
+    assert post.is_file()
+
+
+def test_tampered_waiting_validation_report_is_repaired_without_new_stage_event(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    before = load_task(task_path).stages["analysis"].events
+    report = task_path.parent / "work_orders" / "analysis-validation.json"
+    report.write_text('{"leak":"/Users/Alice Smith/exam.pdf"}', encoding="utf-8")
+
+    runner.resume(task_path)
+
+    assert "/Users/" not in report.read_text(encoding="utf-8")
+    assert load_task(task_path).stages["analysis"].events == before
+
+
+def test_missing_archive_never_remains_falsely_completed(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    task = load_task(task_path)
+    (task.workspace / task.materials[0].archived_path).unlink()
+
+    with pytest.raises(ValueError, match="archived input"):
+        runner.resume(task_path)
+
+    assert load_task(task_path).stages["intake"].status == "failed"
+
+
 def test_attaching_new_answers_invalidates_dependents_but_never_media(tmp_path):
     task_path = _create_task(tmp_path, media=True)
     runner = PipelineRunner(tmp_path, media_provider=UnavailableMediaProvider())
@@ -206,6 +337,103 @@ def test_attaching_new_answers_invalidates_dependents_but_never_media(tmp_path):
     resumed = load_task(task_path)
     assert resumed.stages["intake"].events == intake_events
     assert resumed.stages["media"].events == media_events
+
+
+def test_answer_revision_requires_content_bound_acknowledgement_before_delivery(tmp_path):
+    task_path = _create_task(tmp_path, media=True)
+    runner = PipelineRunner(tmp_path, media_provider=UnavailableMediaProvider())
+    runner.resume(task_path)
+    source = _write_valid_analysis(task_path)
+    assert runner.resume(task_path).status == "completed"
+    before_answer = load_task(task_path)
+    media_events = before_answer.stages["media"].events
+    old_analysis_fingerprint = next(
+        event["fingerprint"]
+        for event in reversed(before_answer.stages["analysis"].events)
+        if event["event"] == "stage_result"
+    )
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. A。\n", encoding="utf-8")
+    attach_reference_answers(task_path, [answer])
+
+    waiting = runner.resume(task_path)
+
+    assert waiting.status == "needs_user_input"
+    waiting_task = load_task(task_path)
+    new_analysis_fingerprint = next(
+        event["fingerprint"]
+        for event in reversed(waiting_task.stages["analysis"].events)
+        if event["event"] == "stage_result"
+    )
+    assert new_analysis_fingerprint != old_analysis_fingerprint
+    revision = json.loads(
+        (task_path.parent / "answers" / "current_revision.json").read_text(encoding="utf-8")
+    )["token"]
+    work_order = (task_path.parent / "work_orders" / "analysis.md").read_text(encoding="utf-8")
+    assert revision in work_order
+    source.write_text(
+        "# 修订后原创讲评\n\n本稿已依据后补正式答案重新核对并完成内容修订。\n",
+        encoding="utf-8",
+    )
+    from chinese_exam_kit.pipeline.runner import _content_fingerprint
+
+    (task_path.parent / "content" / "analysis-receipt.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "answer_revision": revision,
+                "content_fingerprint": _content_fingerprint(task_path.parent / "content"),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    completed = runner.resume(task_path)
+
+    assert completed.status == "completed"
+    assert load_task(task_path).stages["media"].events == media_events
+
+
+def test_missing_answer_revision_marker_is_rebuilt_without_bypassing_wait(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    runner.resume(task_path)
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. A。\n", encoding="utf-8")
+    attach_reference_answers(task_path, [answer])
+    marker = task_path.parent / "answers" / "current_revision.json"
+    expected = json.loads(marker.read_text(encoding="utf-8"))["token"]
+    marker.unlink()
+
+    summary = runner.resume(task_path)
+
+    assert summary.status == "needs_user_input"
+    assert json.loads(marker.read_text(encoding="utf-8"))["token"] == expected
+
+
+def test_missing_docx_or_tampered_delivery_receipt_forces_delivery_rebuild(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    runner.resume(task_path)
+    output = task_path.parent / "output" / "docx" / "00_整卷总览与讲评建议.docx"
+    output.unlink()
+
+    runner.resume(task_path)
+    assert output.is_file()
+    receipt = task_path.parent / "output" / "delivery-receipt.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["outputs"][0]["sha256"] = "0" * 64
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+    mtime = output.stat().st_mtime_ns
+
+    runner.resume(task_path)
+
+    assert output.stat().st_mtime_ns != mtime
 
 
 def test_answer_attachment_recovers_without_duplicate_ledger_after_state_write_crash(
@@ -291,6 +519,15 @@ def test_runner_rejects_task_symlink_escape(tmp_path):
         PipelineRunner(tmp_path).resume(link)
 
 
+def test_runner_rejects_parent_traversal_even_when_it_resolves_to_same_task(tmp_path):
+    task_path = _create_task(tmp_path)
+    (task_path.parent / "nested").mkdir()
+    traversing = task_path.parent / "nested" / ".." / "task.json"
+
+    with pytest.raises(ValueError, match="task path"):
+        PipelineRunner(tmp_path).resume(traversing)
+
+
 def test_runner_rejects_preexisting_pipeline_lock_symlink(tmp_path):
     task_path = _create_task(tmp_path)
     outside = tmp_path / "outside-lock"
@@ -301,6 +538,47 @@ def test_runner_rejects_preexisting_pipeline_lock_symlink(tmp_path):
         PipelineRunner(tmp_path).resume(task_path)
 
     assert outside.read_text(encoding="utf-8") == "do not touch"
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="POSIX no-follow flag unavailable")
+def test_pipeline_lock_uses_no_follow_and_redacts_eloop(tmp_path, monkeypatch):
+    task_path = _create_task(tmp_path)
+    import chinese_exam_kit.pipeline.runner as runner_module
+
+    real_open = runner_module.os.open
+
+    def simulated_race(path, flags, mode=0o777):
+        if Path(path).name == ".pipeline.lock":
+            assert flags & os.O_NOFOLLOW
+            raise OSError(errno.ELOOP, "symlink race", str(path))
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(runner_module.os, "open", simulated_race)
+
+    with pytest.raises(ValueError, match="pipeline lock is unsafe") as captured:
+        PipelineRunner(tmp_path).resume(task_path)
+    assert str(tmp_path) not in str(captured.value)
+
+
+def test_equivalent_macos_var_alias_task_path_is_accepted(tmp_path):
+    task_path = _create_task(tmp_path)
+    canonical = str(task_path)
+    if not canonical.startswith("/private/var/") or not Path("/var").is_symlink():
+        pytest.skip("macOS /var alias unavailable")
+    alias = Path(canonical.replace("/private/var/", "/var/", 1))
+    project_alias = Path(str(tmp_path).replace("/private/var/", "/var/", 1))
+
+    summary = PipelineRunner(project_alias).resume(alias)
+
+    assert summary.status == "needs_user_input"
+
+
+@pytest.mark.parametrize("bad_paths", ("answer.md", b"answer.md", [object()]))
+def test_answer_attachment_rejects_scalar_or_non_pathlike_inputs(tmp_path, bad_paths):
+    task_path = _create_task(tmp_path)
+
+    with pytest.raises(TypeError, match="path-like"):
+        attach_reference_answers(task_path, bad_paths)
 
 
 def test_pipeline_has_no_network_or_git_side_effects(tmp_path, monkeypatch):

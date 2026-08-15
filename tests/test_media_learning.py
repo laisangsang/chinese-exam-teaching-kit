@@ -85,6 +85,72 @@ def test_media_result_rejects_any_host_absolute_path(message):
         MediaLearningResult.degraded(message)
 
 
+@pytest.mark.parametrize("chapters", ("chapter", b"chapter", (object(),)))
+def test_media_result_rejects_string_or_non_chapter_iterables(chapters):
+    with pytest.raises((TypeError, ValueError), match="chapter"):
+        MediaLearningResult.completed(chapters=chapters)
+
+
+def test_media_result_rejects_non_string_status_stably():
+    with pytest.raises(TypeError, match="status"):
+        MediaLearningResult([], (), "")
+
+
+@pytest.mark.parametrize("frames", ("frame", b"frame", (object(),)))
+def test_media_chapter_rejects_string_or_non_frame_iterables(frames):
+    with pytest.raises((TypeError, ValueError), match="frame"):
+        MediaChapter(
+            chapter_id="chapter-1",
+            title="原创讲解",
+            start_ms=0,
+            end_ms=1,
+            frames=frames,
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("chapter_id", "file:///Users/Alice Smith/chapter"),
+        ("title", r"C:\Users\Alice Smith\exam.pdf"),
+        ("section", r"\\server\share\exam.pdf"),
+        ("title", "材料位于 '/Users/Alice Smith/exam.pdf'"),
+    ),
+)
+def test_media_chapter_rejects_host_paths_in_all_free_text(field, value):
+    kwargs = {
+        "chapter_id": "chapter-1",
+        "title": "原创讲解",
+        "section": "reading_1",
+        "start_ms": 0,
+        "end_ms": 1,
+    }
+    kwargs[field] = value
+    with pytest.raises(ValueError, match="host path"):
+        MediaChapter(**kwargs)
+
+
+def test_media_chapter_allows_normal_chinese_slash_expression():
+    chapter = MediaChapter(
+        chapter_id="chapter-1",
+        title="输入/输出关系",
+        section="阅读/表达",
+        start_ms=0,
+        end_ms=1,
+    )
+
+    assert chapter.title == "输入/输出关系"
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    ((True, 2), (0, False), (0.5, 2), (0, 2.5), (-1, 2), (2, 2)),
+)
+def test_media_chapter_rejects_non_integer_or_invalid_time_ranges(start, end):
+    with pytest.raises((TypeError, ValueError), match="time"):
+        MediaChapter("chapter-1", "原创讲解", start, end)
+
+
 def test_missing_frame_tool_degrades_even_when_transcription_is_available(tmp_path):
     chapter = MediaChapter(
         chapter_id="chapter-1",
@@ -103,3 +169,40 @@ def test_missing_frame_tool_degrades_even_when_transcription_is_available(tmp_pa
 
     assert result.status == "degraded"
     assert result.chapters == (chapter,)
+
+
+def test_invalid_injected_transcriber_output_degrades_instead_of_raising(tmp_path):
+    provider = LocalMediaProvider(
+        transcriber=lambda source, output: "not chapters",
+        frame_extractor=lambda source, output, chapters: chapters,
+        command_finder=lambda name: "/usr/bin/ffmpeg",
+    )
+
+    result = provider.process((tmp_path / "lesson.mp4",), tmp_path / "media")
+
+    assert result.status == "degraded"
+    assert result.chapters == ()
+
+
+def test_media_receipt_status_must_match_persisted_stage(tmp_path):
+    from chinese_exam_kit.pipeline.runner import _valid_media_receipt
+
+    index = tmp_path / "index.json"
+    index.write_text('{"status":"degraded"}', encoding="utf-8")
+    import hashlib
+
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "fingerprint": "f" * 64,
+                "status": "completed",
+                "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+                "provider_path": "/Users/Alice Smith/tool",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _valid_media_receipt(receipt, index, "f" * 64) is None

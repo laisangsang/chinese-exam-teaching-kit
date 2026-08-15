@@ -97,3 +97,56 @@ def test_cli_does_not_read_stdin(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", fail_input)
     assert main(["status", "--task", ".local/tasks/missing/task.json", "--json"]) == 2
     capsys.readouterr()
+
+
+def test_cli_never_echoes_posix_windows_or_unc_paths_from_exceptions(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    task = tmp_path / ".local" / "tasks" / "demo" / "task.json"
+    task.parent.mkdir(parents=True)
+    task.write_text("{}", encoding="utf-8")
+    messages = (
+        "failed at '/Users/Alice Smith/exam.pdf'",
+        r"failed at C:\Users\Alice Smith\exam.pdf",
+        r"failed at \\server\share\Alice Smith\exam.pdf",
+        "failed at file:///Users/Alice%20Smith/exam.pdf",
+    )
+    for message in messages:
+        monkeypatch.setattr(
+            "chinese_exam_kit.cli.PipelineRunner.resume",
+            lambda *args, _message=message, **kwargs: (_ for _ in ()).throw(OSError(_message)),
+        )
+        assert main(["run", "--task", ".local/tasks/demo/task.json"]) == 1
+        rendered = capsys.readouterr().err
+        assert "Alice" not in rendered
+        assert "exam.pdf" not in rendered
+
+
+def test_cli_argument_errors_do_not_echo_an_unknown_path(capsys):
+    code = main(["--unknown", r"C:\Users\Alice Smith\exam.pdf"])
+
+    assert code == 2
+    rendered = capsys.readouterr().err
+    assert "Alice" not in rendered
+    assert "exam.pdf" not in rendered
+
+
+def test_cli_accepts_equivalent_macos_var_alias_for_project_content(tmp_path, monkeypatch, capsys):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    content = project / "content"
+    content.mkdir()
+    (content / "00_整卷总览与讲评建议.md").write_text(
+        "# 原创讲评总览\n\n这是通过校验的原创教师讲评说明。\n", encoding="utf-8"
+    )
+    canonical = str(content)
+    if not canonical.startswith("/private/var/") or not Path("/var").is_symlink():
+        return
+    alias = canonical.replace("/private/var/", "/var/", 1)
+
+    code = main(["validate", "--content", alias])
+
+    assert code == 0
+    assert "通过" in capsys.readouterr().out

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
+import stat
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterator, Mapping, Sequence
 
 from chinese_exam_kit.content.docx import build_all
@@ -133,40 +135,83 @@ class PipelineRunner:
         )
         fingerprint = _materials_fingerprint(records)
 
-        def validate_archives() -> None:
+        def validate_archives() -> bool:
             for record in records:
                 archived = task.workspace / record.archived_path
                 if archived.is_symlink() or not archived.is_file():
                     raise ValueError("archived input is missing or unsafe")
                 if sha256_file(archived) != record.sha256:
                     raise ValueError("archived input digest mismatch")
+            return True
 
-        return self._execute(task, "intake", fingerprint, validate_archives)
+        return self._execute(
+            task,
+            "intake",
+            fingerprint,
+            validate_archives,
+            current_validator=validate_archives,
+        )
 
     def _extract(self, task: PipelineTask) -> PipelineTask:
         records = tuple(
             record for record in task.materials if record.material_type in DOCUMENT_TYPES
         )
         fingerprint = _materials_fingerprint(records)
+        base = task.workspace / "artifacts" / "extract"
+        receipt_path = base / "receipt.json"
+        expected_artifacts = tuple(
+            base / record.sha256[:16] / filename
+            for record in records
+            for filename in (
+                "question_text.md",
+                "question_index.json",
+                "extraction_review.json",
+            )
+        )
 
         def extract() -> None:
-            base = task.workspace / "artifacts" / "extract"
+            _reject_symlinks_below(
+                base, managed_root=task.workspace, label="extract artifacts"
+            )
             for record in records:
                 source = task.workspace / record.archived_path
                 result = extract_document(source)
                 write_extraction_artifacts(result, base / record.sha256[:16])
+            _write_file_receipt(
+                receipt_path,
+                root=task.workspace,
+                fingerprint=fingerprint,
+                files=expected_artifacts,
+                field="artifacts",
+            )
 
-        return self._execute(task, "extract", fingerprint, extract)
+        return self._execute(
+            task,
+            "extract",
+            fingerprint,
+            extract,
+            current_validator=lambda: _valid_file_receipt(
+                receipt_path,
+                root=task.workspace,
+                fingerprint=fingerprint,
+                field="artifacts",
+                expected_files=expected_artifacts,
+            ),
+        )
 
     def _media(self, task: PipelineTask) -> PipelineTask:
         records = tuple(record for record in task.materials if record.material_type in MEDIA_TYPES)
         fingerprint = _materials_fingerprint(records)
         current = task.stages["media"]
-        if _is_current(current, fingerprint, {"completed", "degraded"}):
-            return task
         receipt_path = task.workspace / "media" / "receipt.json"
         index_path = task.workspace / "media" / "index.json"
         receipt = _valid_media_receipt(receipt_path, index_path, fingerprint)
+        if (
+            receipt is not None
+            and receipt["status"] == current.status
+            and _is_current(current, fingerprint, {"completed", "degraded"})
+        ):
+            return task
         if receipt is not None:
             task = _begin(task, "media")
             task = _finish(task, "media", receipt["status"], fingerprint)
@@ -199,51 +244,127 @@ class PipelineRunner:
 
     def _knowledge_pre(self, task: PipelineTask) -> PipelineTask:
         fingerprint = _materials_fingerprint(task.materials)
+        audit_path = task.workspace / "knowledge" / "pre_audit.json"
+        payload = {
+            "schema_version": 1,
+            "status": "ready_for_question_level_retrieval",
+            "note": "分析智能体应按知识库规范执行分析前检索和逐题调用。",
+        }
 
         def write_audit() -> None:
-            _atomic_json(
-                task.workspace / "knowledge" / "pre_audit.json",
-                {
-                    "schema_version": 1,
-                    "status": "ready_for_question_level_retrieval",
-                    "note": "分析智能体应按知识库规范执行分析前检索和逐题调用。",
-                },
-            )
+            _atomic_json(audit_path, payload)
 
-        return self._execute(task, "knowledge_pre", fingerprint, write_audit)
+        return self._execute(
+            task,
+            "knowledge_pre",
+            fingerprint,
+            write_audit,
+            current_validator=lambda: _json_file_equals(audit_path, payload),
+        )
 
     def _analysis(self, task: PipelineTask) -> tuple[PipelineTask, bool]:
         content_dir = task.workspace / "content"
-        fingerprint = _content_fingerprint(content_dir)
+        content_fingerprint = _content_fingerprint(content_dir)
+        answer_revision = _current_answer_revision(task)
+        stage_fingerprint = _analysis_stage_fingerprint(
+            content_fingerprint, answer_revision
+        )
+        _ensure_current_answer_marker(task, answer_revision)
+        acknowledgement_valid = _valid_analysis_acknowledgement(
+            content_dir,
+            fingerprint=content_fingerprint,
+            answer_revision=answer_revision,
+        )
         current = task.stages["analysis"]
-        if _is_current(current, fingerprint, {"completed"}):
+        analysis_artifact = task.workspace / "artifacts" / "analysis.json"
+        if (
+            acknowledgement_valid
+            and _is_current(current, stage_fingerprint, {"completed"})
+            and _valid_analysis_artifact(
+                analysis_artifact,
+                fingerprint=content_fingerprint,
+                answer_revision=answer_revision,
+            )
+        ):
             return task, True
         issues = validate_content_dir(content_dir)
-        if issues:
-            if not _is_current(current, fingerprint, {"waiting"}):
-                _write_analysis_work_order(task.workspace)
-                _atomic_json(
-                    task.workspace / "work_orders" / "analysis-validation.json",
-                    {"issues": [issue.to_dict() for issue in issues], "schema_version": 1},
-                )
-                task = _wait(task, "analysis", fingerprint)
+        blocking = [issue.to_dict() for issue in issues]
+        if answer_revision is not None and not acknowledgement_valid:
+            blocking.append(
+                {
+                    "level": "error",
+                    "code": "answer_revision_not_acknowledged",
+                    "path": "analysis-receipt.json",
+                    "line": None,
+                    "module": None,
+                    "section": None,
+                    "message": "正式源稿尚未绑定最新答案版本",
+                }
+            )
+        if blocking:
+            work_order = _analysis_work_order_text(
+                answer_revision=answer_revision,
+                content_fingerprint=content_fingerprint,
+            )
+            validation_payload = {
+                "issues": blocking,
+                "schema_version": 1,
+                "content_fingerprint": content_fingerprint,
+                "answer_revision": answer_revision,
+            }
+            work_order_path = task.workspace / "work_orders" / "analysis.md"
+            validation_path = task.workspace / "work_orders" / "analysis-validation.json"
+            _ensure_atomic_text(work_order_path, work_order)
+            _ensure_atomic_json(validation_path, validation_payload)
+            waiting_artifacts_current = (
+                work_order_path.is_file()
+                and validation_path.is_file()
+                and _is_current(current, stage_fingerprint, {"waiting"})
+            )
+            if not waiting_artifacts_current:
+                task = _wait(task, "analysis", stage_fingerprint)
                 save_task(task)
             return task, False
 
         def record_validated_source() -> None:
             _atomic_json(
-                task.workspace / "artifacts" / "analysis.json",
+                analysis_artifact,
                 {
                     "schema_version": 1,
                     "status": "validated",
-                    "content_fingerprint": fingerprint,
+                    "content_fingerprint": content_fingerprint,
+                    "answer_revision": answer_revision,
                 },
             )
 
-        return self._execute(task, "analysis", fingerprint, record_validated_source), True
+        return (
+            self._execute(
+                task,
+                "analysis",
+                stage_fingerprint,
+                record_validated_source,
+                current_validator=lambda: _valid_analysis_artifact(
+                    analysis_artifact,
+                    fingerprint=content_fingerprint,
+                    answer_revision=answer_revision,
+                ),
+            ),
+            True,
+        )
 
     def _delivery(self, task: PipelineTask) -> PipelineTask:
         fingerprint = _content_fingerprint(task.workspace / "content")
+        receipt_path = task.workspace / "output" / "delivery-receipt.json"
+        expected_outputs = tuple(
+            task.workspace / "output" / "docx" / f"{path.stem}.docx"
+            for path in sorted(
+                (task.workspace / "content").glob("*.md"), key=lambda item: item.name
+            )
+            if path.is_file() and not path.is_symlink()
+        ) + (
+            task.workspace / "output" / "visual-review-checklist.md",
+            task.workspace / "output" / "delivery.json",
+        )
 
         def build() -> None:
             output_dir = task.workspace / "output" / "docx"
@@ -259,39 +380,82 @@ class PipelineRunner:
                 evidence=(_project_relative(self.project_root, checklist),),
             )
             write_delivery_manifest(manifest, task.workspace / "output" / "delivery.json")
+            receipt_files = tuple(outputs) + (
+                checklist,
+                task.workspace / "output" / "delivery.json",
+            )
+            _write_file_receipt(
+                receipt_path,
+                root=task.workspace,
+                fingerprint=fingerprint,
+                files=receipt_files,
+                field="outputs",
+            )
 
-        return self._execute(task, "delivery", fingerprint, build)
+        return self._execute(
+            task,
+            "delivery",
+            fingerprint,
+            build,
+            current_validator=lambda: _valid_file_receipt(
+                receipt_path,
+                root=task.workspace,
+                fingerprint=fingerprint,
+                field="outputs",
+                expected_files=expected_outputs,
+            ),
+        )
 
     def _knowledge_post(self, task: PipelineTask) -> PipelineTask:
         fingerprint = _content_fingerprint(task.workspace / "content")
+        audit_path = task.workspace / "knowledge" / "post_audit.json"
+        payload = {
+            "schema_version": 1,
+            "status": "review_required",
+            "note": "新发现只能进入候选状态；不得自动升级为稳定规则。",
+        }
 
         def write_audit() -> None:
-            _atomic_json(
-                task.workspace / "knowledge" / "post_audit.json",
-                {
-                    "schema_version": 1,
-                    "status": "review_required",
-                    "note": "新发现只能进入候选状态；不得自动升级为稳定规则。",
-                },
-            )
+            _atomic_json(audit_path, payload)
 
-        return self._execute(task, "knowledge_post", fingerprint, write_audit)
+        return self._execute(
+            task,
+            "knowledge_post",
+            fingerprint,
+            write_audit,
+            current_validator=lambda: _json_file_equals(audit_path, payload),
+        )
 
     def _verification(self, task: PipelineTask) -> PipelineTask:
         manifest = task.workspace / "output" / "delivery.json"
         fingerprint = sha256_file(manifest)
+        verification_path = task.workspace / "output" / "verification.json"
 
         def record() -> None:
+            output_records = _manifest_output_records(self.project_root, manifest)
             _atomic_json(
-                task.workspace / "output" / "verification.json",
+                verification_path,
                 {
                     "schema_version": 1,
                     "content_validation": "passed",
                     "visual_review": "evidence_ready",
+                    "manifest_sha256": fingerprint,
+                    "outputs": output_records,
                 },
             )
 
-        return self._execute(task, "verification", fingerprint, record)
+        return self._execute(
+            task,
+            "verification",
+            fingerprint,
+            record,
+            current_validator=lambda: _valid_verification(
+                self.project_root,
+                verification_path,
+                manifest,
+                fingerprint,
+            ),
+        )
 
     def _execute(
         self,
@@ -299,9 +463,15 @@ class PipelineRunner:
         stage: str,
         fingerprint: str,
         action: Callable[[], None],
+        *,
+        current_validator: Callable[[], bool] | None = None,
     ) -> PipelineTask:
         if _is_current(task.stages[stage], fingerprint, {"completed"}):
-            return task
+            try:
+                if current_validator is None or current_validator():
+                    return task
+            except Exception:
+                pass
         task = _begin(task, stage)
         save_task(task)
         try:
@@ -320,6 +490,8 @@ def safe_task_path(project_root: Path, task_path: Path) -> Path:
     candidate = Path(task_path)
     if not candidate.is_absolute():
         candidate = root / candidate
+    if ".." in candidate.parts:
+        raise ValueError("task path cannot contain parent traversal")
     if candidate.name != "task.json":
         raise ValueError("task state path must end with task.json")
     absolute = candidate.absolute()
@@ -332,14 +504,15 @@ def safe_task_path(project_root: Path, task_path: Path) -> Path:
     if any(path.is_symlink() for path in managed_chain):
         raise ValueError("task path cannot use symlinks")
     try:
-        relative = absolute.relative_to(root)
-    except ValueError:
+        resolved = absolute.resolve(strict=True)
+        relative = resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
         raise ValueError("task path must be inside the current project") from None
     if len(relative.parts) != 4 or relative.parts[:2] != (".local", "tasks"):
         raise ValueError("task path must match .local/tasks/SLUG/task.json")
-    if not absolute.is_file():
+    if not resolved.is_file():
         raise ValueError("task.json is unavailable")
-    return absolute
+    return resolved
 
 
 @contextmanager
@@ -347,7 +520,18 @@ def task_lock(workspace: Path) -> Iterator[None]:
     lock_path = Path(workspace) / ".pipeline.lock"
     if lock_path.is_symlink():
         raise ValueError("pipeline lock cannot be a symlink")
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as error:
+        if error.errno in {errno.ELOOP, getattr(errno, "EMLINK", errno.ELOOP)}:
+            raise ValueError("pipeline lock is unsafe") from None
+        raise
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ValueError("pipeline lock is unsafe")
     with os.fdopen(descriptor, "a+b") as handle:
         if os.name == "nt":
             import msvcrt
@@ -428,11 +612,18 @@ def _wait(task: PipelineTask, stage: str, fingerprint: str) -> PipelineTask:
 def _is_current(record: StageRecord, fingerprint: str, statuses: set[str]) -> bool:
     if record.status not in statuses:
         return False
-    return any(
-        event.get("event") == "stage_result"
-        and event.get("fingerprint") == fingerprint
-        and event.get("status") == record.status
-        for event in reversed(record.events)
+    latest = next(
+        (
+            event
+            for event in reversed(record.events)
+            if event.get("event") == "stage_result"
+        ),
+        None,
+    )
+    return bool(
+        latest is not None
+        and latest.get("fingerprint") == fingerprint
+        and latest.get("status") == record.status
     )
 
 
@@ -460,10 +651,39 @@ def _content_fingerprint(content_dir: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_analysis_work_order(workspace: Path) -> None:
-    _atomic_text(
-        workspace / "work_orders" / "analysis.md",
-        """# 分析源稿工作单
+def _analysis_stage_fingerprint(
+    content_fingerprint: str, answer_revision: str | None
+) -> str:
+    payload = f"content:{content_fingerprint}\nanswer:{answer_revision or 'none'}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _analysis_work_order_text(
+    *, answer_revision: str | None, content_fingerprint: str
+) -> str:
+    revision_instructions = ""
+    if answer_revision is not None:
+        revision_instructions = f"""
+
+## 后补答案修订绑定
+
+最新答案版本令牌：`{answer_revision}`
+
+完成答案差异核对和源稿修订后，请在 `content/analysis-receipt.json` 写入：
+
+```json
+{{
+  "schema_version": 1,
+  "answer_revision": "{answer_revision}",
+  "content_fingerprint": "{content_fingerprint}"
+}}
+```
+
+其中 `content_fingerprint` 必须与最终 Markdown 内容完全匹配。仅修改文件时间、复制旧收据或保留旧答案令牌都不能通过门禁。
+
+请先完成源稿修订，再运行一次 `cekit run` 刷新本工作单中的内容指纹，最后按上方结构写入收据并再次运行流水线。
+"""
+    return f"""# 分析源稿工作单
 
 当前流水线已完成本地材料归档与提取，并暂停在分析阶段。
 
@@ -472,7 +692,21 @@ def _write_analysis_work_order(workspace: Path) -> None:
 必须区分【官方评分参考】【文本推导】【教学拓展】，落实选择题逐项证据、主观题答案生成和各板块硬性合同。没有正式答案时仍按【文本推导】继续，并明确答案边界。完成后重新运行 `cekit run --task .local/tasks/SLUG/task.json`。
 
 本工作单不调用外部大模型 API，不绑定任何专有智能体语法，也不代表分析已经完成。
-""",
+{revision_instructions}"""
+
+
+def _write_analysis_work_order(
+    workspace: Path,
+    *,
+    answer_revision: str | None = None,
+    content_fingerprint: str | None = None,
+) -> None:
+    fingerprint = content_fingerprint or _content_fingerprint(workspace / "content")
+    _atomic_text(
+        workspace / "work_orders" / "analysis.md",
+        _analysis_work_order_text(
+            answer_revision=answer_revision, content_fingerprint=fingerprint
+        ),
     )
 
 
@@ -504,6 +738,21 @@ def _atomic_json(path: Path, payload: object) -> Path:
     )
 
 
+def _ensure_atomic_text(path: Path, text: str) -> Path:
+    destination = Path(path)
+    try:
+        if not destination.is_symlink() and destination.read_text(encoding="utf-8") == text:
+            return destination
+    except (OSError, UnicodeError):
+        pass
+    return _atomic_text(destination, text)
+
+
+def _ensure_atomic_json(path: Path, payload: object) -> Path:
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return _ensure_atomic_text(path, text)
+
+
 def _project_relative(project_root: Path, path: Path) -> str:
     try:
         return Path(path).relative_to(project_root).as_posix()
@@ -523,15 +772,293 @@ def _valid_media_receipt(
         return None
     try:
         payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+        index_digest = sha256_file(index_path)
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or not isinstance(index_payload, dict):
         return None
     if (
-        payload.get("schema_version") != 1
+        set(payload) != {"schema_version", "fingerprint", "status", "index_sha256"}
+        or payload.get("schema_version") != 1
         or payload.get("fingerprint") != fingerprint
         or payload.get("status") not in {"completed", "degraded"}
-        or payload.get("index_sha256") != sha256_file(index_path)
+        or index_payload.get("status") != payload.get("status")
+        or payload.get("index_sha256") != index_digest
     ):
         return None
     return {"status": str(payload["status"])}
+
+
+def _json_file_equals(path: Path, expected: object) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) == expected
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
+def _safe_relative_path(value: object) -> str | None:
+    if not isinstance(value, str) or not value or "\\" in value:
+        return None
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        return None
+    if ":" in path.parts[0]:
+        return None
+    return path.as_posix()
+
+
+def _write_file_receipt(
+    destination: Path,
+    *,
+    root: Path,
+    fingerprint: str,
+    files: Sequence[Path],
+    field: str,
+) -> Path:
+    records = []
+    for file_path in sorted((Path(path) for path in files), key=lambda path: path.as_posix()):
+        if file_path.is_symlink() or not file_path.is_file():
+            raise ValueError(f"{field} receipt contains an unsafe file")
+        try:
+            relative = file_path.relative_to(root).as_posix()
+        except ValueError:
+            raise ValueError(f"{field} receipt file escapes the task") from None
+        if _safe_existing_file(root, relative) != file_path.resolve():
+            raise ValueError(f"{field} receipt contains an unsafe file")
+        records.append({"path": relative, "sha256": sha256_file(file_path)})
+    return _atomic_json(
+        destination,
+        {
+            "schema_version": 1,
+            "fingerprint": fingerprint,
+            field: records,
+        },
+    )
+
+
+def _valid_file_receipt(
+    receipt_path: Path,
+    *,
+    root: Path,
+    fingerprint: str,
+    field: str,
+    expected_files: Sequence[Path] | None = None,
+) -> bool:
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        return False
+    try:
+        payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "fingerprint", field}
+        or payload.get("schema_version") != 1
+        or payload.get("fingerprint") != fingerprint
+        or not isinstance(payload.get(field), list)
+    ):
+        return False
+    records = payload[field]
+    if expected_files is not None:
+        try:
+            expected = {
+                Path(path).relative_to(root).as_posix() for path in expected_files
+            }
+        except ValueError:
+            return False
+        actual = {
+            record.get("path") for record in records if isinstance(record, dict)
+        }
+        if actual != expected:
+            return False
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"path", "sha256"}:
+            return False
+        relative = _safe_relative_path(record.get("path"))
+        digest = record.get("sha256")
+        if relative is None or not isinstance(digest, str) or len(digest) != 64:
+            return False
+        path = _safe_existing_file(root, relative)
+        if path is None or sha256_file(path) != digest:
+            return False
+    return True
+
+
+def _current_answer_revision(task: PipelineTask) -> str | None:
+    answers = tuple(
+        sorted(
+            record.sha256
+            for record in task.materials
+            if record.material_type == "answer_candidate"
+        )
+    )
+    if not answers:
+        return None
+    return hashlib.sha256("\n".join(answers).encode("utf-8")).hexdigest()
+
+
+def _ensure_current_answer_marker(
+    task: PipelineTask, answer_revision: str | None
+) -> None:
+    if answer_revision is None:
+        return
+    digests = sorted(
+        record.sha256
+        for record in task.materials
+        if record.material_type == "answer_candidate"
+    )
+    _ensure_atomic_json(
+        task.workspace / "answers" / "current_revision.json",
+        {
+            "schema_version": 1,
+            "token": answer_revision,
+            "answer_sha256": digests,
+        },
+    )
+
+
+def _valid_analysis_acknowledgement(
+    content_dir: Path, *, fingerprint: str, answer_revision: str | None
+) -> bool:
+    if answer_revision is None:
+        return True
+    receipt = content_dir / "analysis-receipt.json"
+    if receipt.is_symlink() or not receipt.is_file():
+        return False
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and set(payload) == {
+            "schema_version",
+            "answer_revision",
+            "content_fingerprint",
+        }
+        and payload.get("schema_version") == 1
+        and payload.get("answer_revision") == answer_revision
+        and payload.get("content_fingerprint") == fingerprint
+    )
+
+
+def _valid_analysis_artifact(
+    path: Path, *, fingerprint: str, answer_revision: str | None
+) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return bool(
+        isinstance(payload, dict)
+        and set(payload)
+        == {
+            "schema_version",
+            "status",
+            "content_fingerprint",
+            "answer_revision",
+        }
+        and payload.get("schema_version") == 1
+        and payload.get("status") == "validated"
+        and payload.get("content_fingerprint") == fingerprint
+        and payload.get("answer_revision") == answer_revision
+    )
+
+
+def _manifest_output_records(project_root: Path, manifest: Path) -> list[dict[str, str]]:
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ValueError("delivery manifest is unreadable") from None
+    outputs = payload.get("outputs") if isinstance(payload, dict) else None
+    if not isinstance(outputs, list) or not outputs:
+        raise ValueError("delivery manifest outputs are invalid")
+    records = []
+    for raw in outputs:
+        relative = _safe_relative_path(raw)
+        if relative is None:
+            raise ValueError("delivery output path is unsafe")
+        path = _safe_existing_file(project_root, relative)
+        if path is None:
+            raise ValueError("delivery output is missing or unsafe")
+        records.append({"path": relative, "sha256": sha256_file(path)})
+    return records
+
+
+def _valid_verification(
+    project_root: Path,
+    verification: Path,
+    manifest: Path,
+    manifest_fingerprint: str,
+) -> bool:
+    if verification.is_symlink() or not verification.is_file():
+        return False
+    try:
+        payload = json.loads(verification.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {
+            "schema_version",
+            "content_validation",
+            "visual_review",
+            "manifest_sha256",
+            "outputs",
+        }
+        or payload.get("schema_version") != 1
+        or payload.get("manifest_sha256") != manifest_fingerprint
+    ):
+        return False
+    try:
+        return payload.get("outputs") == _manifest_output_records(project_root, manifest)
+    except ValueError:
+        return False
+
+
+def _safe_existing_file(root: Path, relative: str) -> Path | None:
+    safe = _safe_relative_path(relative)
+    if safe is None:
+        return None
+    root_path = Path(root).resolve()
+    cursor = root_path
+    for part in PurePosixPath(safe).parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return None
+    try:
+        resolved = cursor.resolve(strict=True)
+        resolved.relative_to(root_path)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _reject_symlinks_below(
+    root: Path, *, managed_root: Path, label: str
+) -> None:
+    path = Path(root)
+    boundary = Path(managed_root)
+    cursor = path
+    while cursor != boundary:
+        if cursor.is_symlink():
+            raise ValueError(f"{label} cannot contain a symlink")
+        if cursor.parent == cursor:
+            raise ValueError(f"{label} escapes its managed root")
+        cursor = cursor.parent
+    if not path.exists():
+        return
+    pending = [path]
+    while pending:
+        directory = pending.pop()
+        for entry in directory.iterdir():
+            if entry.is_symlink():
+                raise ValueError(f"{label} cannot contain a symlink")
+            if entry.is_dir():
+                pending.append(entry)

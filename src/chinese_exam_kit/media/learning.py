@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 import tempfile
@@ -12,8 +11,27 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Protocol, Sequence
 
+from chinese_exam_kit.privacy import contains_host_locator
 
-HOST_PATH_RE = re.compile(r"(?:^|\s)(?:[A-Za-z]:[\\/]|/)\S+")
+
+def _safe_text(value: object, *, field: str, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        raise TypeError(f"{field} must be a non-empty string")
+    if contains_host_locator(value):
+        raise ValueError(f"{field} cannot contain a host path")
+    return value
+
+
+def _typed_tuple(value: object, expected_type: type, *, field: str) -> tuple:
+    if isinstance(value, (str, bytes)):
+        raise TypeError(f"{field} must be an iterable of {expected_type.__name__} values")
+    try:
+        items = tuple(value)
+    except TypeError:
+        raise TypeError(f"{field} must be an iterable of {expected_type.__name__} values") from None
+    if any(not isinstance(item, expected_type) for item in items):
+        raise TypeError(f"{field} must contain only {expected_type.__name__} values")
+    return items
 
 
 def _relative_path(value: str, *, field: str) -> str:
@@ -33,6 +51,8 @@ class FrameReference:
     path: str
 
     def __post_init__(self) -> None:
+        if isinstance(self.timestamp_ms, bool) or not isinstance(self.timestamp_ms, int):
+            raise TypeError("frame time must be an integer")
         if self.timestamp_ms < 0:
             raise ValueError("frame timestamp cannot be negative")
         object.__setattr__(self, "path", _relative_path(self.path, field="frame path"))
@@ -53,11 +73,22 @@ class MediaChapter:
     frames: tuple[FrameReference, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.chapter_id or not self.title:
-            raise ValueError("chapter id and title are required")
+        object.__setattr__(self, "chapter_id", _safe_text(self.chapter_id, field="chapter id"))
+        object.__setattr__(self, "title", _safe_text(self.title, field="chapter title"))
+        object.__setattr__(self, "section", _safe_text(self.section, field="chapter section"))
+        if (
+            isinstance(self.start_ms, bool)
+            or isinstance(self.end_ms, bool)
+            or not isinstance(self.start_ms, int)
+            or not isinstance(self.end_ms, int)
+        ):
+            raise TypeError("chapter time range must use integer milliseconds")
         if self.start_ms < 0 or self.end_ms <= self.start_ms:
             raise ValueError("chapter time range is invalid")
-        if any(number < 1 for number in self.question_numbers):
+        question_numbers = _typed_tuple(
+            self.question_numbers, int, field="question numbers"
+        )
+        if any(isinstance(number, bool) or number < 1 for number in question_numbers):
             raise ValueError("question numbers must be positive")
         if self.transcript_path is not None:
             object.__setattr__(
@@ -65,8 +96,10 @@ class MediaChapter:
                 "transcript_path",
                 _relative_path(self.transcript_path, field="transcript path"),
             )
-        object.__setattr__(self, "question_numbers", tuple(self.question_numbers))
-        object.__setattr__(self, "frames", tuple(self.frames))
+        object.__setattr__(self, "question_numbers", question_numbers)
+        object.__setattr__(
+            self, "frames", _typed_tuple(self.frames, FrameReference, field="frames")
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -87,11 +120,18 @@ class MediaLearningResult:
     message: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.status, str):
+            raise TypeError("media status must be a string")
         if self.status not in {"completed", "degraded"}:
             raise ValueError("media result status is unsupported")
-        if HOST_PATH_RE.search(self.message):
-            raise ValueError("media result message cannot contain a host path")
-        object.__setattr__(self, "chapters", tuple(self.chapters))
+        object.__setattr__(
+            self, "message", _safe_text(self.message, field="media message", allow_empty=True)
+        )
+        object.__setattr__(
+            self,
+            "chapters",
+            _typed_tuple(self.chapters, MediaChapter, field="chapters"),
+        )
 
     @classmethod
     def completed(
@@ -171,12 +211,22 @@ class LocalMediaProvider:
         degraded = self._frame_extractor is None
         try:
             for media_path in media_paths:
-                transcribed = tuple(self._transcriber(Path(media_path), destination))
+                transcribed = _typed_tuple(
+                    self._transcriber(Path(media_path), destination),
+                    MediaChapter,
+                    field="transcribed chapters",
+                )
                 if self._frame_extractor is None:
                     chapters.extend(transcribed)
                 else:
                     chapters.extend(
-                        self._frame_extractor(Path(media_path), destination, transcribed)
+                        _typed_tuple(
+                            self._frame_extractor(
+                                Path(media_path), destination, transcribed
+                            ),
+                            MediaChapter,
+                            field="frame-aligned chapters",
+                        )
                     )
         except Exception:
             return MediaLearningResult.degraded(
