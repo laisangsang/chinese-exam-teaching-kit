@@ -15,4 +15,6 @@
 单套试卷只能把候选知识推进到 `verified`，不能推进到 `stable`。纯文本推导不能单独完成验证。任何反例或冲突都会触发复审。
 `review_required` 卡必须记录 `review_reason`（或冲突验证案例），`deprecated` 卡必须记录 `deprecation_reason`，避免状态变化失去可追溯原因。
 
+每条 `sources` 必须提供稳定且在卡内唯一的 `id`、`kind`、`name` 和 `locator`。验证案例中的 `source_id` 必须精确绑定其中一个来源；`formal_exam` 只能绑定正式试卷来源，`formal_answer` 只能绑定正式答案来源，`text_inference` 可绑定文本推导或原创示范来源，但不计入稳定状态门槛。`exam_id` 与 `source_id` 会去除首尾空白后再去重，禁止控制字符，大小写保持精确、不自动折叠。
+
 未来如需提供演示知识卡，只能放在 `examples/original-mini-exam/knowledge/`，并明确标注为原创案例；演示卡不得放入本公共稳定库，也不得冒充已完成跨试卷验证的稳定知识。

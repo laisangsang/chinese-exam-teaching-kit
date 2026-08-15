@@ -3,12 +3,20 @@
 from .ingest import CandidateKnowledge, Conflict, StatusDecision, VerificationCase, evaluate_status
 from .matching import KnowledgeSearchWorkOrder, QuestionMatch, match_manifest
 from .questions import QuestionKnowledge, append_audit_event
-from .store import KnowledgeCard, build_index, load_contract, search_cards, validate_library
+from .store import (
+    IndexBuildFailure,
+    KnowledgeCard,
+    build_index,
+    load_contract,
+    search_cards,
+    validate_library,
+)
 
 __all__ = [
     "CandidateKnowledge",
     "Conflict",
     "KnowledgeCard",
+    "IndexBuildFailure",
     "KnowledgeSearchWorkOrder",
     "QuestionKnowledge",
     "QuestionMatch",

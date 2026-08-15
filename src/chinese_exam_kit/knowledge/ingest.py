@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Mapping
@@ -10,6 +11,18 @@ from typing import Any, Mapping
 
 STATUSES = frozenset({"candidate", "verified", "stable", "review_required", "deprecated"})
 EVIDENCE_KINDS = frozenset({"formal_exam", "formal_answer", "text_inference"})
+
+
+def normalize_identifier(value: str, *, field_name: str) -> str:
+    """Trim an identifier while preserving case and rejecting control characters."""
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    if any(unicodedata.category(character).startswith("C") for character in value):
+        raise ValueError(f"{field_name} must not contain control characters")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{field_name} is required")
+    return normalized
 
 
 def _absolute_path_like(value: str) -> bool:
@@ -47,10 +60,13 @@ class CandidateKnowledge:
             json.dumps(dict(self.source), ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as error:
             raise ValueError("candidate source must be JSON-safe") from error
-        for field in ("kind", "name", "locator"):
+        for field in ("id", "kind", "name", "locator"):
             value = self.source.get(field)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"candidate source {field} is required")
+        source_id = str(self.source["id"])
+        if normalize_identifier(source_id, field_name="candidate source id") != source_id:
+            raise ValueError("candidate source id must not contain surrounding whitespace")
         locator = self.source.get("locator")
         if isinstance(locator, str) and _absolute_path_like(locator):
             raise ValueError("candidate source must not contain an absolute path")
@@ -78,8 +94,16 @@ class VerificationCase:
     conflict: bool = False
 
     def __post_init__(self) -> None:
-        if not self.exam_id.strip() or not self.source_id.strip():
-            raise ValueError("verification exam_id and source_id are required")
+        object.__setattr__(
+            self,
+            "exam_id",
+            normalize_identifier(self.exam_id, field_name="verification exam_id"),
+        )
+        object.__setattr__(
+            self,
+            "source_id",
+            normalize_identifier(self.source_id, field_name="verification source_id"),
+        )
         if self.exam_year is not None and not 1900 <= self.exam_year <= 9999:
             raise ValueError("verification exam_year is invalid")
         if self.evidence_kind not in EVIDENCE_KINDS:

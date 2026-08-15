@@ -27,6 +27,7 @@ def test_candidate_knowledge_is_json_safe():
         statement="先定位，再整合。",
         modules=("reading_1",),
         source={
+            "id": "original-example",
             "kind": "original_example",
             "name": "原创微型案例",
             "locator": "examples/original-mini-exam",
@@ -39,6 +40,7 @@ def test_candidate_knowledge_is_json_safe():
         "statement": "先定位，再整合。",
         "modules": ["reading_1"],
         "source": {
+            "id": "original-example",
             "kind": "original_example",
             "name": "原创微型案例",
             "locator": "examples/original-mini-exam",
@@ -55,6 +57,7 @@ def test_candidate_knowledge_rejects_absolute_source_locator():
             statement="不记录本机路径。",
             modules=("reading_1",),
             source={
+                "id": "original-exam",
                 "kind": "formal_exam",
                 "name": "原创试卷",
                 "locator": "/private/exam.pdf",
@@ -70,6 +73,7 @@ def test_candidate_knowledge_rejects_source_parent_traversal():
             statement="不记录目录逃逸路径。",
             modules=("reading_1",),
             source={
+                "id": "original-exam",
                 "kind": "formal_exam",
                 "name": "原创试卷",
                 "locator": "../../private/exam.pdf",
@@ -84,7 +88,11 @@ def test_candidate_knowledge_requires_traceable_source_fields():
             title="来源边界",
             statement="候选知识必须可追溯。",
             modules=("reading_1",),
-            source={"kind": "formal_exam", "locator": "examples/original-exam.md"},
+            source={
+                "id": "original-exam",
+                "kind": "formal_exam",
+                "locator": "examples/original-exam.md",
+            },
         )
 
 
@@ -202,3 +210,27 @@ def test_review_resolution_with_independent_evidence_can_restore_verified():
     )
 
     assert decision.status == "verified"
+
+
+def test_verification_exam_ids_are_trimmed_before_deduplication():
+    decision = evaluate_status(
+        "method",
+        verification_cases=(
+            one_case(exam_id="original-exam-a", source_id="source-a"),
+            one_case(exam_id=" original-exam-a ", source_id="source-b"),
+        ),
+    )
+
+    assert decision.status == "verified"
+
+
+@pytest.mark.parametrize("field", ["exam_id", "source_id"])
+def test_verification_ids_reject_control_characters(field):
+    values = {
+        "exam_id": "original-exam-a",
+        "source_id": "original-source-a",
+    }
+    values[field] = values[field] + "\nprivate"
+
+    with pytest.raises(ValueError, match="control"):
+        VerificationCase(**values)

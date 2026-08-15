@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ modules = ["reading_1"]
 question_types = ["information_extraction"]
 abilities = ["evidence_location"]
 sources = [
-  {{ kind = "original_example", name = "原创微型案例", locator = "examples/original-mini-exam/README.md" }}
+  {{ id = "original-example", kind = "original_example", name = "原创微型案例", locator = "examples/original-mini-exam/README.md" }}
 ]
 +++
 
@@ -73,6 +74,22 @@ def _add_verification_cases(card_path: Path, *cases: dict[str, object]) -> None:
     )
 
 
+def _set_sources(card_path: Path, *sources: dict[str, str]) -> None:
+    rendered_sources = []
+    for source in sources:
+        fields = ", ".join(
+            f"{key} = {json.dumps(value, ensure_ascii=False)}"
+            for key, value in source.items()
+        )
+        rendered_sources.append(f"  {{ {fields} }}")
+    replacement = "sources = [\n" + ",\n".join(rendered_sources) + "\n]\n"
+    text = card_path.read_text(encoding="utf-8")
+    card_path.write_text(
+        re.sub(r"(?ms)^sources = \[\n.*?^\]\n", replacement, text, count=1),
+        encoding="utf-8",
+    )
+
+
 def test_empty_public_library_is_valid(tmp_path):
     contract = load_contract(Path("config/knowledge_contract.json"))
 
@@ -103,8 +120,10 @@ def test_index_rejects_card_path_outside_library(tmp_path):
         body=parsed.body,
     )
 
-    with pytest.raises(ValueError, match="inside the knowledge library"):
-        build_index((escaped,), contract, tmp_path)
+    result = build_index((escaped,), contract, tmp_path)
+
+    assert [issue.code for issue in result.errors] == ["invalid_card_path"]
+    assert not hasattr(result, "index") or result.index is None
 
 
 def test_index_rejects_windows_absolute_card_path_on_any_platform(tmp_path):
@@ -118,8 +137,45 @@ def test_index_rejects_windows_absolute_card_path_on_any_platform(tmp_path):
         body=parsed.body,
     )
 
-    with pytest.raises(ValueError, match="inside the knowledge library"):
-        build_index((escaped,), contract, tmp_path)
+    result = build_index((escaped,), contract, tmp_path)
+
+    assert [issue.code for issue in result.errors] == ["invalid_card_path"]
+
+
+def test_index_rejects_relative_sibling_path(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    _write_card(tmp_path, card_id="MT-0001", title="索引边界", body="只记录 cards。")
+    parsed = validate_library(tmp_path, contract).cards[0]
+    escaped = type(parsed)(
+        path=Path("outside/MT-0001.md"),
+        metadata=parsed.metadata,
+        sections=parsed.sections,
+        body=parsed.body,
+    )
+
+    result = build_index((escaped,), contract, tmp_path)
+
+    assert [issue.code for issue in result.errors] == ["invalid_card_path"]
+
+
+def test_index_rejects_absolute_path_inside_root_but_outside_cards(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    _write_card(tmp_path, card_id="MT-0001", title="索引边界", body="只记录 cards。")
+    parsed = validate_library(tmp_path, contract).cards[0]
+    invalid_path = tmp_path / "other" / "MT-0001.md"
+    escaped = type(parsed)(
+        path=invalid_path,
+        metadata=parsed.metadata,
+        sections=parsed.sections,
+        body=parsed.body,
+    )
+
+    result = build_index((escaped,), contract, tmp_path)
+
+    assert [issue.code for issue in result.errors] == ["invalid_card_path"]
+    assert str(invalid_path) not in json.dumps(
+        [issue.to_dict() for issue in result.errors], ensure_ascii=False
+    )
 
 
 def test_search_is_deterministic_and_uses_public_card_content(tmp_path):
@@ -260,6 +316,21 @@ def test_stable_card_accepts_two_distinct_exam_cases(tmp_path):
         ),
         encoding="utf-8",
     )
+    _set_sources(
+        card_path,
+        {
+            "id": "original-source-a",
+            "kind": "formal_exam",
+            "name": "原创试卷 A",
+            "locator": "examples/original-a.md",
+        },
+        {
+            "id": "original-source-b",
+            "kind": "formal_exam",
+            "name": "原创试卷 B",
+            "locator": "examples/original-b.md",
+        },
+    )
     _add_verification_cases(
         card_path,
         {
@@ -281,6 +352,138 @@ def test_stable_card_accepts_two_distinct_exam_cases(tmp_path):
     result = validate_library(tmp_path, contract)
 
     assert result.errors == ()
+
+
+def test_verification_case_source_id_must_exist_in_card_sources(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="来源绑定", body="测试来源绑定。"
+    )
+    _add_verification_cases(
+        card_path,
+        {
+            "exam_id": "original-exam-a",
+            "source_id": "unknown-source",
+            "exam_year": 2025,
+            "evidence_kind": "formal_exam",
+            "official_support": False,
+        },
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert "unknown_verification_source" in {issue.code for issue in result.errors}
+
+
+def test_verification_evidence_kind_must_match_bound_source_kind(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="证据类型", body="测试证据类型。"
+    )
+    _add_verification_cases(
+        card_path,
+        {
+            "exam_id": "original-exam-a",
+            "source_id": "original-example",
+            "exam_year": 2025,
+            "evidence_kind": "formal_exam",
+            "official_support": False,
+        },
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert "verification_source_kind_mismatch" in {
+        issue.code for issue in result.errors
+    }
+
+
+def test_high_risk_stable_card_accepts_three_bound_diverse_sources(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="高风险门槛", body="测试高风险门槛。"
+    )
+    text = card_path.read_text(encoding="utf-8")
+    card_path.write_text(
+        text.replace('status = "candidate"', 'status = "stable"').replace(
+            'risk_level = "normal"', 'risk_level = "high"'
+        ),
+        encoding="utf-8",
+    )
+    _set_sources(
+        card_path,
+        *(
+            {
+                "id": f"source-{letter}",
+                "kind": "formal_answer" if letter == "c" else "formal_exam",
+                "name": f"原创来源 {letter.upper()}",
+                "locator": f"examples/original-{letter}.md",
+            }
+            for letter in "abc"
+        ),
+    )
+    _add_verification_cases(
+        card_path,
+        *(
+            {
+                "exam_id": f"exam-{letter}",
+                "source_id": f"source-{letter}",
+                "exam_year": year,
+                "evidence_kind": "formal_answer" if letter == "c" else "formal_exam",
+                "official_support": letter == "c",
+            }
+            for letter, year in zip("abc", (2023, 2024, 2025), strict=True)
+        ),
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert result.errors == ()
+
+
+def test_original_or_inference_sources_cannot_support_stable_status(tmp_path):
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    card_path = _write_card(
+        tmp_path, card_id="MT-0001", title="推导边界", body="测试推导边界。"
+    )
+    card_path.write_text(
+        card_path.read_text(encoding="utf-8").replace(
+            'status = "candidate"', 'status = "stable"'
+        ),
+        encoding="utf-8",
+    )
+    _set_sources(
+        card_path,
+        {
+            "id": "inference-a",
+            "kind": "text_inference",
+            "name": "文本推导 A",
+            "locator": "examples/inference-a.md",
+        },
+        {
+            "id": "inference-b",
+            "kind": "text_inference",
+            "name": "文本推导 B",
+            "locator": "examples/inference-b.md",
+        },
+    )
+    _add_verification_cases(
+        card_path,
+        *(
+            {
+                "exam_id": f"exam-{letter}",
+                "source_id": f"inference-{letter}",
+                "exam_year": 2025,
+                "evidence_kind": "text_inference",
+                "official_support": False,
+            }
+            for letter in "ab"
+        ),
+    )
+
+    result = validate_library(tmp_path, contract)
+
+    assert "unsupported_declared_status" in {issue.code for issue in result.errors}
 
 
 def test_verification_case_ids_must_be_nonempty_strings(tmp_path):
@@ -347,6 +550,23 @@ def test_relative_library_root_indexes_cards_relative_to_the_library(tmp_path, m
         json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     assert validate_library(root, contract).errors == ()
+
+
+def test_absolute_library_root_accepts_card_path_relative_to_working_directory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    relative_root = Path("knowledge")
+    card_path = _write_card(
+        relative_root, card_id="MT-0001", title="绝对根", body="测试绝对根。"
+    )
+    contract = load_contract(
+        Path(__file__).resolve().parents[1] / "config/knowledge_contract.json"
+    )
+
+    index = build_index((parse_card(card_path),), contract, relative_root.resolve())
+
+    assert index["cards"][0]["path"] == "cards/methods/MT-0001.md"
 
 
 @pytest.mark.parametrize("link_kind", ["file", "directory"])

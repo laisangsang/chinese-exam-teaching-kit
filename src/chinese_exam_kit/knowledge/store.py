@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping
 
-from .ingest import VerificationCase, evaluate_status
+from .ingest import VerificationCase, evaluate_status, normalize_identifier
 
 
 @dataclass(frozen=True)
@@ -67,6 +67,12 @@ class SearchResult:
     card: KnowledgeCard
     score: int
     matched_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class IndexBuildFailure:
+    errors: tuple[Issue, ...]
+    index: None = None
 
 
 def load_contract(path: Path) -> dict[str, Any]:
@@ -407,6 +413,7 @@ def _validate_card(
             )
 
     sources = metadata.get("sources", [])
+    source_by_id: dict[str, Mapping[str, Any]] = {}
     if not isinstance(sources, list) or not sources:
         issues.append(_issue(card, root, "missing_source", "at least one source is required"))
     else:
@@ -414,9 +421,47 @@ def _validate_card(
             if not isinstance(source, dict):
                 issues.append(_issue(card, root, "invalid_source", "source must be an object"))
                 continue
+            source_id = source.get("id")
+            try:
+                normalized_source_id = normalize_identifier(
+                    source_id, field_name="source id"
+                )
+            except ValueError:
+                normalized_source_id = ""
+                issues.append(
+                    _issue(
+                        card,
+                        root,
+                        "invalid_source_id",
+                        "source id must be a nonempty canonical identifier",
+                    )
+                )
+            else:
+                if normalized_source_id != source_id:
+                    issues.append(
+                        _issue(
+                            card,
+                            root,
+                            "noncanonical_source_id",
+                            "source id must not contain surrounding whitespace",
+                        )
+                    )
+                elif normalized_source_id in source_by_id:
+                    issues.append(
+                        _issue(
+                            card,
+                            root,
+                            "duplicate_source_id",
+                            "source ids must be unique within a card",
+                        )
+                    )
+                else:
+                    source_by_id[normalized_source_id] = source
             if any(
                 not isinstance(source.get(field), str) or not source[field].strip()
-                for field in contract.get("required_source_fields", ("kind", "name", "locator"))
+                for field in contract.get(
+                    "required_source_fields", ("id", "kind", "name", "locator")
+                )
             ):
                 issues.append(
                     _issue(
@@ -452,6 +497,39 @@ def _validate_card(
 
     cases, case_issues = _verification_cases(card, root)
     issues.extend(case_issues)
+    bound_cases: list[VerificationCase] = []
+    allowed_source_kinds = contract.get(
+        "verification_source_kind_map",
+        {
+            "formal_exam": ["formal_exam"],
+            "formal_answer": ["formal_answer"],
+            "text_inference": ["text_inference", "original_example"],
+        },
+    )
+    for case in cases:
+        source = source_by_id.get(case.source_id)
+        if source is None:
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    "unknown_verification_source",
+                    "verification source_id is not declared by the card",
+                )
+            )
+            continue
+        allowed = allowed_source_kinds.get(case.evidence_kind, [])
+        if source.get("kind") not in allowed:
+            issues.append(
+                _issue(
+                    card,
+                    root,
+                    "verification_source_kind_mismatch",
+                    "verification evidence kind does not match its bound source",
+                )
+            )
+            continue
+        bound_cases.append(case)
     status = metadata.get("status")
     if (
         status in {"verified", "stable"}
@@ -460,7 +538,7 @@ def _validate_card(
     ):
         decision = evaluate_status(
             card_type or "unknown",
-            verification_cases=cases,
+            verification_cases=tuple(bound_cases),
             risk_level=str(metadata.get("risk_level", "normal")),
         )
         supported = decision.status in (
@@ -481,7 +559,7 @@ def _validate_card(
     )
     review_field = str(status_fields.get("review_required", "review_reason"))
     if status == "review_required":
-        has_conflict = any(case.conflict for case in cases)
+        has_conflict = any(case.conflict for case in bound_cases)
         if not has_conflict and not str(metadata.get(review_field, "")).strip():
             issues.append(
                 _issue(
@@ -557,15 +635,19 @@ def validate_library(root: Path, contract: Mapping[str, Any]) -> LibraryValidati
             )
         else:
             has_card_errors = any(issue.level == "error" for issue in issues)
-            if not has_card_errors and saved != build_index(tuple(cards), contract, root):
-                issues.append(
-                    Issue(
-                        "error",
-                        "index_out_of_sync",
-                        "index.json",
-                        "index must be rebuilt",
+            if not has_card_errors:
+                expected_index = build_index(tuple(cards), contract, root)
+                if isinstance(expected_index, IndexBuildFailure):
+                    issues.extend(expected_index.errors)
+                elif saved != expected_index:
+                    issues.append(
+                        Issue(
+                            "error",
+                            "index_out_of_sync",
+                            "index.json",
+                            "index must be rebuilt",
+                        )
                     )
-                )
     return LibraryValidation(tuple(cards), tuple(issues))
 
 
@@ -573,36 +655,21 @@ def build_index(
     cards: Iterable[KnowledgeCard] | Path,
     contract: Mapping[str, Any],
     root: Path | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | IndexBuildFailure:
     if isinstance(cards, Path):
         root = cards
-        card_items = discover_cards(cards)
+        try:
+            card_items = discover_cards(cards)
+        except (OSError, ValueError):
+            return _index_path_failure()
     else:
         card_items = tuple(cards)
     base = Path(root) if root is not None else Path(".")
     entries: list[dict[str, Any]] = []
     for card in sorted(card_items, key=lambda item: item.card_id):
-        raw_path = card.path.as_posix()
-        if (PureWindowsPath(raw_path).is_absolute() and not card.path.is_absolute()) or (
-            "\\" in raw_path
-        ):
-            raise ValueError("card path must stay inside the knowledge library")
-        if card.path.is_absolute():
-            try:
-                relative_path = card.path.resolve().relative_to(base.resolve()).as_posix()
-            except ValueError as error:
-                raise ValueError("card path must stay inside the knowledge library") from error
-        else:
-            relative = PurePosixPath(card.path.as_posix())
-            lexical_base = PurePosixPath(base.as_posix())
-            if root is not None and not lexical_base.is_absolute():
-                try:
-                    relative = relative.relative_to(lexical_base)
-                except ValueError:
-                    pass
-            if ".." in relative.parts:
-                raise ValueError("card path must stay inside the knowledge library")
-            relative_path = relative.as_posix()
+        relative_path = _index_card_path(card.path, base)
+        if relative_path is None:
+            return _index_path_failure()
         entries.append(
             {
                 "id": card.card_id,
@@ -623,6 +690,59 @@ def build_index(
         "generated_at": None,
         "cards": entries,
     }
+
+
+def _index_path_failure() -> IndexBuildFailure:
+    return IndexBuildFailure(
+        errors=(
+            Issue(
+                "error",
+                "invalid_card_path",
+                "cards",
+                "card path must resolve inside the library cards directory",
+            ),
+        )
+    )
+
+
+def _index_card_path(path: Path, base: Path) -> str | None:
+    raw_path = path.as_posix()
+    if (PureWindowsPath(raw_path).is_absolute() and not path.is_absolute()) or (
+        "\\" in raw_path
+    ):
+        return None
+    try:
+        resolved_root = base.resolve()
+        resolved_cards = (resolved_root / "cards").resolve()
+    except (OSError, RuntimeError):
+        return None
+    if not _inside(resolved_cards, resolved_root):
+        return None
+
+    if path.is_absolute():
+        try:
+            resolved_path = path.resolve()
+        except (OSError, RuntimeError):
+            return None
+    else:
+        relative = PurePosixPath(raw_path)
+        if ".." in relative.parts:
+            return None
+        try:
+            if len(relative.parts) >= 3 and relative.parts[0] == "cards":
+                resolved_path = (resolved_root / Path(*relative.parts)).resolve()
+            else:
+                resolved_path = path.resolve()
+        except (OSError, RuntimeError):
+            return None
+
+    try:
+        within_cards = resolved_path.relative_to(resolved_cards)
+    except ValueError:
+        return None
+    if len(within_cards.parts) < 2 or within_cards.suffix != ".md":
+        return None
+    return PurePosixPath("cards", *within_cards.parts).as_posix()
 
 
 def _normalized(value: str) -> str:

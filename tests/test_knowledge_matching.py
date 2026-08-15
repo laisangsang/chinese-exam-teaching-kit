@@ -266,6 +266,31 @@ def test_audit_rejects_single_segment_absolute_posix_path(tmp_path):
         )
 
 
+def test_audit_rejects_embedded_single_segment_absolute_posix_path(tmp_path):
+    with pytest.raises(ValueError, match="absolute path"):
+        append_audit_event(
+            tmp_path,
+            task_id="original-task",
+            stage="pre",
+            event="search",
+            details={"source": "说明见 /tmp 后续"},
+        )
+
+
+@pytest.mark.parametrize("expression", ["按 A / B / C 三步", "普通中文/并列/表达"])
+def test_audit_allows_non_path_slash_expressions(tmp_path, expression):
+    path = append_audit_event(
+        tmp_path,
+        task_id="original-task",
+        stage="pre",
+        event="search",
+        details={"note": expression},
+        timestamp="2026-08-15T00:00:00Z",
+    )
+
+    assert json.loads(path.read_text(encoding="utf-8"))["details"]["note"] == expression
+
+
 def test_append_audit_event_rejects_non_json_values_without_touching_file(tmp_path):
     with pytest.raises(ValueError, match="JSON-safe"):
         append_audit_event(

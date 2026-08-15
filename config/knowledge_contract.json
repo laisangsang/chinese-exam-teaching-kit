@@ -50,8 +50,13 @@
     "支持证据",
     "反例与冲突"
   ],
-  "required_source_fields": ["kind", "name", "locator"],
+  "required_source_fields": ["id", "kind", "name", "locator"],
   "verification_case_fields": ["exam_id", "source_id"],
+  "verification_source_kind_map": {
+    "formal_exam": ["formal_exam"],
+    "formal_answer": ["formal_answer"],
+    "text_inference": ["text_inference", "original_example"]
+  },
   "status_required_fields": {
     "review_required": "review_reason",
     "deprecated": "deprecation_reason"
