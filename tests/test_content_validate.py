@@ -526,6 +526,35 @@ def test_issue_order_uses_every_serialized_field():
 
 
 @pytest.mark.parametrize(
+    ("first_values", "second_values"),
+    (
+        ({"module": None}, {"module": ""}),
+        ({"section": None}, {"section": ""}),
+        ({"line": None}, {"line": -1}),
+    ),
+)
+def test_issue_order_distinguishes_null_from_legal_empty_or_negative_values(
+    first_values, second_values
+):
+    common = {
+        "level": "error",
+        "code": "same_code",
+        "path": "same.md",
+        "message": "same message",
+        "line": 7,
+        "module": "reading_1",
+        "section": "same section",
+    }
+    first = ValidationIssue(**(common | first_values))
+    second = ValidationIssue(**(common | second_values))
+    forward = (first, second)
+    backward = (second, first)
+
+    assert format_issues_json(forward) == format_issues_json(backward)
+    assert format_issues_text(forward) == format_issues_text(backward)
+
+
+@pytest.mark.parametrize(
     "line", ("> TODO", "1. 待补充", "- [ ] TBD", "> - [x] 同上", "**TODO**。")
 )
 def test_markdown_prefixed_standalone_placeholders_are_rejected(tmp_path, line):

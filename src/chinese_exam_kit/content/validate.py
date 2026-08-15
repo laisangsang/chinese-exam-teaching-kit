@@ -56,13 +56,21 @@ class _Heading:
 def _issue_key(issue: ValidationIssue) -> tuple[object, ...]:
     return (
         issue.path,
-        issue.module or "",
-        -1 if issue.line is None else issue.line,
+        _optional_text_key(issue.module),
+        _optional_line_key(issue.line),
         issue.level,
         issue.code,
-        issue.section or "",
+        _optional_text_key(issue.section),
         issue.message,
     )
+
+
+def _optional_text_key(value: str | None) -> tuple[bool, str]:
+    return (value is not None, value if value is not None else "")
+
+
+def _optional_line_key(value: int | None) -> tuple[bool, int]:
+    return (value is not None, value if value is not None else 0)
 
 
 def _ordered(issues: Iterable[ValidationIssue]) -> tuple[ValidationIssue, ...]:
