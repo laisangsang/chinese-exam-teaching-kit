@@ -14,6 +14,7 @@ HEADING_RE = re.compile(r"(?m)^(?P<marks>#{1,6})[ \t]+(?P<title>[^\n]+?)\s*$")
 TEMPLATE_VARIABLE_RE = re.compile(r"\$\{[^{}\n]+\}")
 QUESTION_NUMBER_RE = re.compile(r"第?\s*\d+\s*题")
 OPTION_REFERENCE_RE = re.compile(r"(?<![A-Za-z])([A-D])\s*项", re.IGNORECASE)
+HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -49,10 +50,19 @@ class _Heading:
     body_start: int
     end: int
     body: str
+    direct_body: str
 
 
 def _issue_key(issue: ValidationIssue) -> tuple[object, ...]:
-    return (issue.path, issue.line or 0, issue.code, issue.message, issue.module or "")
+    return (
+        issue.path,
+        issue.module or "",
+        -1 if issue.line is None else issue.line,
+        issue.level,
+        issue.code,
+        issue.section or "",
+        issue.message,
+    )
 
 
 def _ordered(issues: Iterable[ValidationIssue]) -> tuple[ValidationIssue, ...]:
@@ -98,12 +108,25 @@ def _display_path(path: Path) -> str:
     return path.name or "."
 
 
+def _without_html_comments(text: str) -> str:
+    """Hide complete or unclosed comments while preserving offsets and line numbers."""
+
+    def hide(match: re.Match[str]) -> str:
+        return "".join("\n" if character == "\n" else " " for character in match.group())
+
+    return HTML_COMMENT_RE.sub(hide, text)
+
+
 def _headings(text: str) -> tuple[_Heading, ...]:
-    matches = tuple(HEADING_RE.finditer(text))
+    visible = _without_html_comments(text)
+    matches = tuple(HEADING_RE.finditer(visible))
     result: list[_Heading] = []
     for index, match in enumerate(matches):
         level = len(match.group("marks"))
         end = len(text)
+        direct_end = len(text)
+        if index + 1 < len(matches):
+            direct_end = matches[index + 1].start()
         for following in matches[index + 1 :]:
             if len(following.group("marks")) <= level:
                 end = following.start()
@@ -116,7 +139,8 @@ def _headings(text: str) -> tuple[_Heading, ...]:
                 start=match.start(),
                 body_start=match.end(),
                 end=end,
-                body=text[match.end() : end],
+                body=visible[match.end() : end],
+                direct_body=visible[match.end() : direct_end],
             )
         )
     return tuple(result)
@@ -129,6 +153,7 @@ def _normalized_heading(title: str) -> str:
 
 
 def _substantive_characters(body: str) -> int:
+    body = _without_html_comments(body)
     lines = []
     for line in body.splitlines():
         if HEADING_RE.match(line) or line.lstrip().startswith("<!--"):
@@ -172,21 +197,20 @@ def _validate_common(
     issues: list[ValidationIssue] = []
     placeholder_tokens = rules.get("standalone_placeholders", [])
     if isinstance(placeholder_tokens, list) and placeholder_tokens:
-        alternatives = "|".join(re.escape(str(token)) for token in placeholder_tokens)
-        placeholder_re = re.compile(
-            rf"(?im)^\s*(?:#{{1,6}}\s*)?(?:[-*+]\s*)?(?:\*\*)?(?P<token>{alternatives})(?:\*\*)?[。；;]?\s*$"
-        )
-        for match in placeholder_re.finditer(text):
-            issues.append(
-                ValidationIssue(
-                    "error",
-                    "placeholder",
-                    display_path,
-                    f"不得保留占位表达：{match.group('token')}",
-                    text.count("\n", 0, match.start()) + 1,
-                    module_id,
+        normalized_tokens = {str(token).casefold(): str(token) for token in placeholder_tokens}
+        for line_number, line in enumerate(text.splitlines(), 1):
+            token = _standalone_placeholder(line, normalized_tokens)
+            if token is not None:
+                issues.append(
+                    ValidationIssue(
+                        "error",
+                        "placeholder",
+                        display_path,
+                        f"不得保留占位表达：{token}",
+                        line_number,
+                        module_id,
+                    )
                 )
-            )
     if not template:
         for match in TEMPLATE_VARIABLE_RE.finditer(text):
             issues.append(
@@ -200,6 +224,26 @@ def _validate_common(
                 )
             )
     return issues
+
+
+def _standalone_placeholder(
+    line: str, normalized_tokens: Mapping[str, str]
+) -> str | None:
+    """Return a full-line placeholder after removing common Markdown prefixes."""
+    value = line.strip()
+    value = re.sub(r"^(?:>\s*)+", "", value)
+    value = re.sub(r"^#{1,6}\s+", "", value)
+    value = re.sub(r"^(?:[-*+]|\d+[.)、])\s+", "", value)
+    value = re.sub(r"^\[[ xX]\]\s+", "", value)
+    value = value.rstrip("。；;").strip()
+    for wrapper in ("**", "__", "`"):
+        if (
+            value.startswith(wrapper)
+            and value.endswith(wrapper)
+            and len(value) > len(wrapper) * 2
+        ):
+            value = value[len(wrapper) : -len(wrapper)].strip()
+    return normalized_tokens.get(value.casefold())
 
 
 def _validate_sections(
@@ -286,16 +330,35 @@ def _question_headings(text: str, kind: str) -> tuple[_Heading, ...]:
     selected: list[_Heading] = []
     for heading in headings:
         title = _normalized_heading(heading.title)
-        if kind in title:
+        explicit = re.fullmatch(rf"{re.escape(kind)}\s*[：:]\s*\S.*", title)
+        if explicit:
             selected.append(heading)
-        elif kind == "选择题" and QUESTION_NUMBER_RE.search(title) and OPTION_REFERENCE_RE.search(heading.body):
+        elif (
+            kind == "选择题"
+            and QUESTION_NUMBER_RE.search(title)
+            and _has_direct_option_marker(heading)
+        ):
             selected.append(heading)
     return tuple(selected)
+
+
+def _has_direct_option_marker(heading: _Heading) -> bool:
+    if OPTION_REFERENCE_RE.search(heading.direct_body):
+        return True
+    return any(
+        child.level == heading.level + 1
+        and re.fullmatch(
+            r"[A-Da-d]\s*项(?:[：:].*)?", _normalized_heading(child.title)
+        )
+        for child in _headings(heading.body)
+    )
 
 
 def _option_sections(block: _Heading) -> Mapping[str, _Heading]:
     sections: dict[str, _Heading] = {}
     for heading in _headings(block.body):
+        if heading.level != block.level + 1:
+            continue
         match = re.fullmatch(r"([A-Da-d])\s*项(?:[：:].*)?", _normalized_heading(heading.title))
         if match:
             sections[match.group(1).upper()] = heading
@@ -336,7 +399,9 @@ def _validate_choice_evidence(
                 missing = list(fields)
             else:
                 for field, aliases in fields.items():
-                    if not _field_has_value(section.body, tuple(str(item) for item in aliases)):
+                    if not _field_has_value(
+                        section.direct_body, tuple(str(item) for item in aliases)
+                    ):
                         missing.append(field)
             if missing:
                 issues.append(
@@ -381,7 +446,9 @@ def _validate_subjective_chain(
         missing = [
             field
             for field, aliases in fields.items()
-            if not _field_has_value(block.body, tuple(str(item) for item in aliases))
+            if not _field_has_value(
+                block.direct_body, tuple(str(item) for item in aliases)
+            )
         ]
         if missing:
             issues.append(
@@ -420,7 +487,7 @@ def validate_file(
     if module_id not in modules:
         return (
             ValidationIssue(
-                "error", "invalid_module", display_path, "未知的内容板块", module=module_id
+                "error", "invalid_module", display_path, "未知的内容板块", module="unknown"
             ),
         )
     try:
@@ -517,6 +584,7 @@ def validate_content_dir(
             ),
         )
     filename_modules = loaded.get("module_files", {})
+    overview_files = frozenset(str(item) for item in loaded.get("overview_files", ()))
     issues: list[ValidationIssue] = []
     for path in markdown_entries:
         if path.is_symlink():
@@ -532,7 +600,17 @@ def validate_content_dir(
             )
             continue
         module_id = filename_modules.get(path.name)
-        if module_id is None:
+        if module_id is None and path.name not in overview_files:
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "unknown_module_file",
+                    path.name,
+                    "Markdown 文件名不在公开内容白名单中",
+                    module="unknown",
+                )
+            )
+        elif module_id is None:
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError):

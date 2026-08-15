@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from chinese_exam_kit.content.validate import (
+    ValidationIssue,
     format_issues_json,
     format_issues_text,
     validate_content_dir,
@@ -108,6 +109,181 @@ def test_subjective_answer_chain_is_checked_inside_each_question(tmp_path):
     )
 
 
+def test_nested_question_cannot_lend_subjective_steps_to_its_parent(tmp_path):
+    source = _write(
+        tmp_path / "01.md",
+        """# 阅读一
+
+## 主观题答案生成
+
+### 主观题：甲
+
+- 审题：明确甲题任务。
+
+#### 主观题：乙
+
+- 证据：定位乙题原文。
+- 关系：整合乙题信息。
+- 评分点：形成乙题要点。
+- 参考答案：组织乙题答案。
+- 失分诊断：说明乙题风险。
+""",
+    )
+
+    issues = validate_file(source, "reading_1")
+
+    assert any(
+        issue.code == "missing_subjective_step"
+        and "主观题：甲" in issue.message
+        and "证据" in issue.message
+        for issue in issues
+    )
+
+
+def test_nested_option_cannot_supply_fields_to_a_direct_option(tmp_path):
+    source = _write(
+        tmp_path / "01.md",
+        """# 阅读一
+
+## 逐选项证据
+
+### 选择题：甲
+
+#### A项
+
+- 原文位置：甲题首段。
+
+##### B项
+
+- 原文位置：嵌套位置。
+- 选项改写：嵌套改写。
+- 正误判断：嵌套判断。
+- 设误类型：嵌套类型。
+
+#### C项
+
+- 原文位置：甲题末段。
+- 选项改写：甲题改写。
+- 正误判断：甲题判断。
+- 设误类型：甲题类型。
+
+#### D项
+
+- 原文位置：甲题末段。
+- 选项改写：甲题改写。
+- 正误判断：甲题判断。
+- 设误类型：甲题类型。
+""",
+    )
+
+    issues = validate_file(source, "reading_1")
+
+    assert any(
+        issue.code == "missing_option_evidence"
+        and "A 项" in issue.message
+        and "选项改写" in issue.message
+        for issue in issues
+    )
+    assert any(
+        issue.code == "missing_option_evidence" and "B 项" in issue.message
+        for issue in issues
+    )
+
+
+def test_subjective_container_heading_is_not_a_question_instance(tmp_path):
+    source = _write(
+        tmp_path / "01.md",
+        """# 阅读一
+
+## 主观题答案生成
+
+- 审题：这是章节操作说明。
+- 证据：这是章节操作说明。
+- 关系：这是章节操作说明。
+- 评分点：这是章节操作说明。
+- 参考答案：这是章节操作说明。
+- 失分诊断：这是章节操作说明。
+""",
+    )
+
+    issues = validate_file(source, "reading_1")
+
+    assert any(issue.code == "missing_subjective_chain" for issue in issues)
+
+
+def test_numbered_question_does_not_borrow_choice_markers_from_nested_question(tmp_path):
+    source = _write(
+        tmp_path / "01.md",
+        """# 阅读一
+
+## 第1题
+
+这是第一题的普通说明。
+
+### 第2题
+
+【文本推导】A项表述需要逐项核对。
+""",
+    )
+
+    issues = validate_file(source, "reading_1")
+    option_messages = [
+        issue.message for issue in issues if issue.code == "missing_option_evidence"
+    ]
+
+    assert any("第2题" in message for message in option_messages)
+    assert not any("第1题" in message for message in option_messages)
+
+
+def _complete_option_question(label: str) -> str:
+    options = []
+    for option in "ABCD":
+        options.append(
+            f"""#### {option}项
+
+- 原文位置：{label}的证据位置。
+- 选项改写：{label}的选项改写。
+- 正误判断：{label}的正误判断。
+- 设误类型：{label}的设误说明。
+"""
+        )
+    return f"### 选择题：{label}\n\n" + "\n".join(options)
+
+
+def _complete_subjective_question(label: str) -> str:
+    return f"""### 主观题：{label}
+
+- 审题：明确{label}的任务。
+- 证据：定位{label}的证据。
+- 关系：整合{label}的信息。
+- 评分点：拆分{label}的要点。
+- 参考答案：组织{label}的答案。
+- 失分诊断：诊断{label}的风险。
+"""
+
+
+def test_multiple_choice_and_subjective_questions_are_validated_independently(tmp_path):
+    source = _write(
+        tmp_path / "01.md",
+        "# 阅读一\n\n## 逐选项证据\n\n"
+        + _complete_option_question("甲")
+        + "\n"
+        + _complete_option_question("乙")
+        + "\n## 主观题答案生成\n\n"
+        + _complete_subjective_question("丙")
+        + "\n"
+        + _complete_subjective_question("丁"),
+    )
+
+    issues = validate_file(source, "reading_1")
+
+    assert not any(issue.code == "missing_option_evidence" for issue in issues)
+    assert not any(
+        issue.code in {"missing_subjective_chain", "missing_subjective_step"}
+        for issue in issues
+    )
+
+
 def test_evidence_layers_require_substantive_content_not_label_mentions(tmp_path):
     source = _write(
         tmp_path / "01.md",
@@ -158,6 +334,67 @@ def test_required_section_must_be_a_heading_with_substantive_body(tmp_path):
     )
     assert any(
         issue.code == "empty_required_section" and issue.section == "重点字词拓展"
+        for issue in issues
+    )
+
+
+def test_multiline_and_unclosed_html_comments_do_not_fill_required_sections(tmp_path):
+    source = _write(
+        tmp_path / "03.md",
+        """# 文言文
+
+## 全文逐句注释
+
+<!--
+这段注释很长，但不属于教师可见内容。
+-->
+
+## 重点字词拓展
+
+<!-- 未闭合注释也不能充当可见内容。
+这里仍然只是注释。
+""",
+    )
+
+    issues = validate_file(source, "classical_chinese")
+
+    assert any(
+        issue.code == "empty_required_section" and issue.section == "全文逐句注释"
+        for issue in issues
+    )
+    assert any(
+        issue.code == "empty_required_section" and issue.section == "重点字词拓展"
+        for issue in issues
+    )
+
+
+def test_html_comments_cannot_create_or_fill_evidence_layers(tmp_path):
+    source = _write(
+        tmp_path / "01.md",
+        """# 阅读一
+
+## 【官方评分参考】
+
+<!--
+注释中的正式答案说明不可见。
+-->
+
+<!--
+## 【文本推导】
+
+注释中的标题与推导均不可见。
+-->
+""",
+    )
+
+    issues = validate_file(source, "reading_1")
+
+    assert any(
+        issue.code == "empty_evidence_layer" and issue.section == "官方评分参考"
+        for issue in issues
+    )
+    assert any(
+        issue.code == "missing_evidence_layer" and issue.section == "文本推导"
         for issue in issues
     )
 
@@ -223,6 +460,23 @@ def test_unknown_module_and_invalid_utf8_are_structured_without_absolute_paths(t
     assert "secret.md" in rendered
 
 
+@pytest.mark.parametrize(
+    "module_id",
+    ("/Users/private/secret", r"C:\\private\\secret", r"\\\\server\\private"),
+)
+def test_unknown_module_identifier_is_not_reflected_in_results(tmp_path, module_id):
+    source = _write(tmp_path / "source.md", "# 原创内容\n")
+
+    issues = validate_file(source, module_id)
+    json_output = format_issues_json(issues)
+    text_output = format_issues_text(issues)
+
+    assert [issue.code for issue in issues] == ["invalid_module"]
+    assert issues[0].module == "unknown"
+    assert module_id not in json_output
+    assert module_id not in text_output
+
+
 def test_issue_renderers_are_deterministic_machine_and_human_outputs(tmp_path):
     source = _write(tmp_path / "01.md", "# 阅读一\n\nTODO\n")
     issues = validate_file(source, "reading_1")
@@ -243,6 +497,55 @@ def test_issue_renderers_are_deterministic_machine_and_human_outputs(tmp_path):
     )
     assert format_issues_text(reversed(issues)) == format_issues_text(issues)
     assert all("code" in item and "level" in item for item in payload)
+
+
+def test_issue_order_uses_every_serialized_field():
+    issues = (
+        ValidationIssue(
+            "warning",
+            "same_code",
+            "same.md",
+            "same message",
+            line=7,
+            module="reading_1",
+            section="乙",
+        ),
+        ValidationIssue(
+            "error",
+            "same_code",
+            "same.md",
+            "same message",
+            line=7,
+            module="reading_1",
+            section="甲",
+        ),
+    )
+
+    assert format_issues_json(issues) == format_issues_json(reversed(issues))
+    assert format_issues_text(issues) == format_issues_text(reversed(issues))
+
+
+@pytest.mark.parametrize(
+    "line", ("> TODO", "1. 待补充", "- [ ] TBD", "> - [x] 同上", "**TODO**。")
+)
+def test_markdown_prefixed_standalone_placeholders_are_rejected(tmp_path, line):
+    source = _write(tmp_path / "01.md", f"# 阅读一\n\n{line}\n")
+
+    issues = validate_file(source, "reading_1")
+
+    assert any(issue.code == "placeholder" for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "sentence",
+    ("TODO 项已全部完成。", "此处待补充的是方法说明，而非占位符。", "同上观点仍需结合语境辨析。"),
+)
+def test_placeholder_words_inside_natural_sentences_are_allowed(tmp_path, sentence):
+    source = _write(tmp_path / "01.md", f"# 阅读一\n\n{sentence}\n")
+
+    issues = validate_file(source, "reading_1")
+
+    assert not any(issue.code == "placeholder" for issue in issues)
 
 
 def test_content_directory_rejects_symlinks_without_following_them(tmp_path):
@@ -270,6 +573,29 @@ def test_content_directory_reports_missing_or_empty_directories_without_leaking_
     assert [issue.code for issue in missing] == ["content_dir_missing"]
     assert [issue.code for issue in empty] == ["no_markdown_sources"]
     assert str(tmp_path) not in format_issues_json((*missing, *empty))
+
+
+def test_content_directory_rejects_unrecognized_markdown_files(tmp_path):
+    content = tmp_path / "content"
+    content.mkdir()
+    _write(content / "notes.md", "# 普通说明\n\n这里没有占位内容。\n")
+
+    issues = validate_content_dir(content)
+
+    assert [issue.code for issue in issues] == ["unknown_module_file"]
+
+
+def test_content_directory_allows_the_whitelisted_overview_file(tmp_path):
+    content = tmp_path / "content"
+    content.mkdir()
+    _write(
+        content / "00_整卷总览与讲评建议.md",
+        "# 整卷总览\n\n这是已完成的原创总览说明。\n",
+    )
+
+    issues = validate_content_dir(content)
+
+    assert issues == ()
 
 
 def test_public_templates_are_complete_original_scaffolds_without_placeholder_lines():

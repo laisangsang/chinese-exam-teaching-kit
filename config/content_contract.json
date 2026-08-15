@@ -1,5 +1,8 @@
 {
   "schema_version": 1,
+  "overview_files": [
+    "00_整卷总览与讲评建议.md"
+  ],
   "module_files": {
     "01_阅读一_信息类文本详案.md": "reading_1",
     "02_阅读二_文学类文本详案.md": "reading_2",
