@@ -810,6 +810,7 @@ def test_nested_encoded_control_and_host_path_forms_are_not_masked(
     "suffix",
     (
         "?cache=%25" + "2FUsers%25" + "2Fperson-a",
+        "?cache=%25" + "2Fcustom-root%25" + "2Fprivate.md",
         "#target=file%25" + "3A%25" + "2F%25" + "2FUsers",
         "?target=C%25" + "3A%25" + "2Fprivate",
     ),
@@ -883,5 +884,68 @@ def test_angle_destination_title_is_strict_and_never_masks_title_paths(tmp_path)
     unsafe = "[源码](<" + destination + '> "' + title_path + '")'
     _write(tmp_path, "docs/links.md", unsafe)
     assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize("angle", (False, True))
+@pytest.mark.parametrize(
+    "destination",
+    (
+        "%2F" + "Users%2Fperson-a%2Fprivate.md",
+        _generic_posix("%55" + "sers", "person-a", "private.md"),
+        _generic_posix("%2e" + "%2e", "Users", "person-a", "private.md"),
+        "%252F" + "Users%252Fperson-a%252Fprivate.md",
+    ),
+)
+def test_encoded_markdown_host_paths_are_directly_rejected(
+    tmp_path, destination, angle
+):
+    rendered = "<" + destination + ">" if angle else destination
+    _write(tmp_path, "docs/links.md", "[不安全](" + rendered + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize("angle", (False, True))
+def test_percent_decoding_beyond_the_limit_is_directly_rejected(tmp_path, angle):
+    destination = "%25252525252F" + "Users%252Fprivate.md"
+    rendered = "<" + destination + ">" if angle else destination
+    _write(tmp_path, "docs/links.md", "[不安全](" + rendered + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize("angle", (False, True))
+@pytest.mark.parametrize(
+    "destination",
+    (
+        "C%3A%2F" + "Users%2Fperson-a%2Fprivate.md",
+        "%2F%2F" + "server%2Fshare%2Fprivate.md",
+        "file%3A%2F%2F%2F" + "Users%2Fperson-a%2Fprivate.md",
+    ),
+)
+def test_encoded_windows_unc_and_file_destinations_are_directly_rejected(
+    tmp_path, destination, angle
+):
+    rendered = "<" + destination + ">" if angle else destination
+    _write(tmp_path, "docs/links.md", "[不安全](" + rendered + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize("angle", (False, True))
+def test_relative_percent_encoded_markdown_filename_is_allowed(tmp_path, angle):
+    destination = "/".join(("guides", "%E4%B8%AD%E6%96%87.md"))
+    rendered = "<" + destination + ">" if angle else destination
+    _write(tmp_path, "docs/links.md", "[中文说明](" + rendered + ")")
+
+    assert "absolute_path" not in _codes(
         audit_repository(tmp_path, tracked=("docs/links.md",))
     )

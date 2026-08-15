@@ -11,6 +11,7 @@ import stat
 import subprocess
 import unicodedata
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
@@ -19,6 +20,13 @@ from urllib.parse import unquote, urlsplit
 _MAX_TEXT_SCAN_BYTES = 2 * 1024 * 1024
 _SAFE_REMOTE_REPOSITORY = "laisangsang/chinese-exam-teaching-kit"
 _LFS_HEADER = "version " + "https://git-lfs.github.com/spec/v1"
+
+
+class _MarkdownDestinationDisposition(Enum):
+    SAFE_TO_MASK = "safe_to_mask"
+    UNSAFE_PATH = "unsafe_path"
+    ORDINARY_UNMASKED = "ordinary_unmasked"
+
 
 _DEFAULT_POLICY: dict[str, object] = {
     "schema_version": 1,
@@ -665,7 +673,9 @@ def _scan_text(
 
 
 def _contains_absolute_path(text: str) -> bool:
-    text = _mask_safe_path_contexts(text)
+    text, unsafe_markdown_destination = _mask_safe_path_contexts(text)
+    if unsafe_markdown_destination:
+        return True
     file_prefix = "file" + ":"
     if re.search(re.escape(file_prefix) + r"[\\/]{1,3}", text, flags=re.IGNORECASE):
         return True
@@ -737,8 +747,9 @@ def _contains_absolute_path(text: str) -> bool:
     return False
 
 
-def _mask_safe_path_contexts(text: str) -> str:
+def _mask_safe_path_contexts(text: str) -> tuple[str, bool]:
     masked = [False] * len(text)
+    unsafe_markdown_destination = False
     web_url = re.compile(r"(?i)\bht" + r"tps?://[^\s<>\"']+")
     for match in web_url.finditer(text):
         candidate = match.group(0)
@@ -771,27 +782,58 @@ def _mask_safe_path_contexts(text: str) -> str:
     )
     for match in markdown_link.finditer(text):
         destination = match.group("destination")
-        if _safe_markdown_root_destination(destination):
+        disposition = _markdown_destination_disposition(destination)
+        if disposition is _MarkdownDestinationDisposition.SAFE_TO_MASK:
             start, end = match.span("destination")
             masked[start:end] = [True] * (end - start)
-    return "".join(" " if hidden else character for character, hidden in zip(text, masked))
+        elif disposition is _MarkdownDestinationDisposition.UNSAFE_PATH:
+            unsafe_markdown_destination = True
+    masked_text = "".join(
+        " " if hidden else character
+        for character, hidden in zip(text, masked)
+    )
+    return masked_text, unsafe_markdown_destination
 
 
-def _safe_markdown_root_destination(destination: str) -> bool:
+def _markdown_destination_disposition(
+    destination: str,
+) -> _MarkdownDestinationDisposition:
     if destination.startswith("<") or destination.endswith(">"):
         if not (destination.startswith("<") and destination.endswith(">")):
-            return False
+            return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
         destination = destination[1:-1]
         if not destination or "<" in destination or ">" in destination:
-            return False
+            return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
         if any(character.isspace() for character in destination):
-            return False
+            if _looks_like_host_path(destination):
+                return _MarkdownDestinationDisposition.UNSAFE_PATH
+            return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
+
+    if _valid_http_url(destination):
+        return _MarkdownDestinationDisposition.SAFE_TO_MASK
+
+    if "%" in destination:
+        decoded = _bounded_destination_decode(destination)
+        if decoded is None:
+            return _MarkdownDestinationDisposition.UNSAFE_PATH
+    else:
+        decoded = destination
+
+    if _looks_like_host_path(decoded):
+        return _MarkdownDestinationDisposition.UNSAFE_PATH
+    if not decoded.startswith("/"):
+        return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
+    if _safe_public_root_destination(decoded):
+        return _MarkdownDestinationDisposition.SAFE_TO_MASK
+    return _MarkdownDestinationDisposition.UNSAFE_PATH
+
+
+def _safe_public_root_destination(destination: str) -> bool:
     if not destination.startswith("/") or destination.startswith("//"):
         return False
-    decoded = _bounded_destination_decode(destination)
-    if decoded is None:
+    if not _safe_destination_decode_state(destination):
         return False
-    path = decoded.split("#", 1)[0].split("?", 1)[0]
+    path = destination.split("#", 1)[0].split("?", 1)[0]
     if not path.startswith("/") or path.startswith("//"):
         return False
     parts = tuple(path[1:].split("/"))
@@ -825,6 +867,7 @@ def _safe_markdown_root_destination(destination: str) -> bool:
 
 def _bounded_destination_decode(value: str, *, maximum_rounds: int = 4) -> str | None:
     current = value
+    started_absolute = current.startswith("/")
     for _ in range(maximum_rounds):
         if not _safe_destination_decode_state(current):
             return None
@@ -834,6 +877,8 @@ def _bounded_destination_decode(value: str, *, maximum_rounds: int = 4) -> str |
             return None
         if decoded == current:
             return current
+        if not started_absolute and decoded.startswith("/"):
+            return None
         current = decoded
 
     if not _safe_destination_decode_state(current):
@@ -845,6 +890,29 @@ def _bounded_destination_decode(value: str, *, maximum_rounds: int = 4) -> str |
     if next_value != current:
         return None
     return current
+
+
+def _valid_http_url(value: str) -> bool:
+    if not re.match(r"(?i)^ht" + r"tps?://", value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname or ""
+    except ValueError:
+        return False
+    return parsed.scheme.casefold() in {"http", "https"} and bool(
+        re.fullmatch(r"[A-Za-z0-9.-]+|[A-Fa-f0-9:]+", hostname)
+    )
+
+
+def _looks_like_host_path(value: str) -> bool:
+    if re.search(r"(?i)(?<![A-Za-z])file:[\\/]{1,3}", value):
+        return True
+    if re.search(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]", value):
+        return True
+    if re.search(r"(?<!:)//[A-Za-z0-9._-]+(?:/|$)", value):
+        return True
+    return False
 
 
 def _safe_destination_decode_state(value: str) -> bool:
@@ -875,6 +943,13 @@ def _safe_destination_decode_state(value: str) -> bool:
         rf"(?i)(?:^|[=?#&])/(?:{sensitive_roots})(?:/|$)", value
     ):
         return False
+    for marker in ("?", "#"):
+        marker_index = value.find(marker)
+        if marker_index < 0:
+            continue
+        suffix = value[marker_index + 1 :]
+        if re.search(r"(?:^|[=&])/(?!/)[^\s&#]+", suffix):
+            return False
     return not re.search(r"(?:^|[/=?#&])\.\.(?:[/=?#&]|$)", value)
 
 
