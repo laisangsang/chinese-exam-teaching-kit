@@ -23,6 +23,10 @@ def _posix_path() -> str:
     return "/" + "/".join(("Users", "person-a", "Desktop", "draft.pdf"))
 
 
+def _generic_posix(*parts: str) -> str:
+    return "/" + "/".join(parts)
+
+
 def _windows_path() -> str:
     return "C:" + "\\" + "\\".join(("Users", "person-a", "draft.pdf"))
 
@@ -48,7 +52,7 @@ def _codes(issues: tuple[ReleaseIssue, ...]) -> set[str]:
     [
         ("docs/leak.md", _posix_path(), "absolute_path"),
         ("materials/exam.md", "原创", "forbidden_path"),
-        ("docs/key.md", "api_key = '" + _secret() + "'", "secret_pattern"),
+        ("docs/key.md", "api_" + "key = '" + _secret() + "'", "secret_pattern"),
         ("docs/drive.md", _windows_path(), "absolute_path"),
         ("docs/share.md", _unc_path(), "absolute_path"),
         ("docs/uri.md", _file_uri(), "absolute_path"),
@@ -158,7 +162,9 @@ def test_release_guard_blocks_a_git_submodule_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(
         release_guard,
         "_tracked_entries",
-        lambda root: (("160000", "docs/vendor"),),
+        lambda root: (
+            release_guard._GitEntry("160000", "a" * 40, "docs/vendor", True),
+        ),
     )
     monkeypatch.setattr(release_guard, "_remote_urls", lambda root: ())
 
@@ -200,8 +206,8 @@ def test_release_guard_policy_cannot_expand_the_fixed_public_surface(tmp_path):
 @pytest.mark.parametrize(
     "contents",
     (
-        "aws_secret_access_key = '" + "a" * 40 + "'",
-        "connection_" + "string = 'Server=db;Password=" + "a" * 20 + "'",
+        "aws_secret_" + "access_key = '" + "a" * 40 + "'",
+        "connection_" + "string = 'Server=db;Pass" + "word=" + "a" * 20 + "'",
         "-----BEGIN " + "PRIVATE KEY-----\n" + "a" * 32,
     ),
 )
@@ -299,8 +305,34 @@ def test_git_inventory_uses_nul_delimited_primary_paths_and_index_modes(monkeypa
 
     monkeypatch.setattr(release_guard, "_git", fake_git)
 
-    assert release_guard._tracked_entries(Path(".")) == (("100644", "docs/原创.md"),)
+    assert release_guard._tracked_entries(Path(".")) == (
+        release_guard._GitEntry("100644", "a" * 40, "docs/原创.md", True),
+    )
     assert calls == [("ls-files", "-z"), ("ls-files", "-s", "-z")]
+
+
+def test_unmerged_non_stage_zero_index_is_rejected(tmp_path, monkeypatch):
+    relative = "docs/conflict.md"
+    oid_a = b"a" * 40
+    oid_b = b"b" * 40
+
+    def fake_git(root, arguments):
+        if arguments == ("ls-files", "-z"):
+            return relative.encode() + b"\0"
+        if arguments == ("ls-files", "-s", "-z"):
+            return (
+                b"100644 " + oid_a + b" 1\t" + relative.encode() + b"\0"
+                b"100644 " + oid_b + b" 2\t" + relative.encode() + b"\0"
+            )
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(release_guard, "_git", fake_git)
+    entry = release_guard._tracked_entries(tmp_path)[0]
+    assert entry.mode == "conflict"
+    monkeypatch.setattr(release_guard, "_tracked_entries", lambda root: (entry,))
+    monkeypatch.setattr(release_guard, "_remote_urls", lambda root: ())
+
+    assert "invalid_git_mode" in _codes(audit_repository(tmp_path))
 
 
 def test_default_git_inventory_blocks_local_or_unrelated_remote(tmp_path):
@@ -322,8 +354,8 @@ def test_default_git_inventory_blocks_local_or_unrelated_remote(tmp_path):
     "remote",
     (
         "https://github.com/laisangsang/chinese-exam-teaching-kit.git",
-        "git@github.com:laisangsang/chinese-exam-teaching-kit.git",
-        "ssh://git@github.com/laisangsang/chinese-exam-teaching-kit.git",
+        "git" + "@" + "github.com:laisangsang/chinese-exam-teaching-kit.git",
+        "ssh://" + "git" + "@" + "github.com/laisangsang/chinese-exam-teaching-kit.git",
     ),
 )
 def test_only_the_authorized_public_repository_remote_is_accepted(remote):
@@ -337,7 +369,9 @@ def test_release_audit_cli_json_is_machine_readable_and_exit_code_tracks_errors(
     _write(tmp_path, "docs/leak.md", _posix_path())
     monkeypatch.setattr(
         "chinese_exam_kit.release_guard._tracked_entries",
-        lambda root: (("100644", "docs/leak.md"),),
+        lambda root: (
+            release_guard._GitEntry("100644", None, "docs/leak.md", False),
+        ),
     )
     monkeypatch.setattr(
         "chinese_exam_kit.release_guard._remote_urls", lambda root: ()
@@ -356,7 +390,9 @@ def test_release_audit_cli_human_clean_output(tmp_path, monkeypatch, capsys):
     _write(tmp_path, "README.md", "safe")
     monkeypatch.setattr(
         "chinese_exam_kit.release_guard._tracked_entries",
-        lambda root: (("100644", "README.md"),),
+        lambda root: (
+            release_guard._GitEntry("100644", None, "README.md", False),
+        ),
     )
     monkeypatch.setattr(
         "chinese_exam_kit.release_guard._remote_urls", lambda root: ()
@@ -364,3 +400,264 @@ def test_release_audit_cli_human_clean_output(tmp_path, monkeypatch, capsys):
 
     assert main(["release-audit"]) == 0
     assert "0 errors" in capsys.readouterr().out
+
+
+def test_index_blob_is_release_truth_even_when_worktree_was_made_safe(tmp_path):
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    relative = "docs/staged.md"
+    _write(tmp_path, relative, "safe\n")
+    subprocess.run(("git", "add", "--", relative), cwd=tmp_path, check=True)
+    _write(tmp_path, relative, "api_" + "key = '" + _secret() + "'\n")
+    subprocess.run(("git", "add", "--", relative), cwd=tmp_path, check=True)
+    _write(tmp_path, relative, "safe worktree\n")
+
+    issues = audit_repository(tmp_path)
+
+    assert "secret_pattern" in _codes(issues)
+    assert "worktree_mismatch" in _codes(issues)
+
+
+@pytest.mark.parametrize(
+    ("relative", "staged", "code"),
+    (
+        ("docs/staged.txt", b"safe\0binary", "binary_file"),
+        (
+            "docs/pointer.txt",
+            (
+                "version https://git-lfs.github.com/spec/v1\n"
+                "oid sha256:" + "b" * 64 + "\nsize 99\n"
+            ).encode(),
+            "lfs_pointer",
+        ),
+        ("docs/staged.pdf", b"document", "forbidden_extension"),
+    ),
+)
+def test_staged_binary_lfs_and_forbidden_types_are_checked_from_index(
+    tmp_path, relative, staged, code
+):
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(staged)
+    subprocess.run(("git", "add", "--", relative), cwd=tmp_path, check=True)
+    target.write_text("safe worktree\n", encoding="utf-8")
+
+    assert code in _codes(audit_repository(tmp_path))
+
+
+def test_push_remote_is_audited_even_when_fetch_remote_is_safe(tmp_path):
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    _write(tmp_path, "README.md", "safe")
+    subprocess.run(("git", "add", "README.md"), cwd=tmp_path, check=True)
+    safe = "https://github.com/laisangsang/chinese-exam-teaching-kit.git"
+    subprocess.run(("git", "remote", "add", "origin", safe), cwd=tmp_path, check=True)
+    subprocess.run(
+        ("git", "remote", "set-url", "--add", "--push", "origin", _file_uri()),
+        cwd=tmp_path,
+        check=True,
+    )
+
+    issues = audit_repository(tmp_path)
+
+    assert "unsafe_remote" in _codes(issues)
+
+
+@pytest.mark.parametrize(
+    "locator",
+    (
+        _generic_posix("mnt", "share", "exam.md"),
+        _generic_posix("srv", "app", "config.toml"),
+        _generic_posix("workspace", "project", "note.md"),
+        _generic_posix("data", "exam.pdf"),
+        _generic_posix("custom-root"),
+        "file:" + _generic_posix("srv", "data", "exam.pdf"),
+        "/" * 2 + "/".join(("server", "share", "exam.pdf")),
+    ),
+)
+def test_generic_absolute_filesystem_locators_are_blocked(tmp_path, locator):
+    _write(tmp_path, "docs/locator.md", "source=" + locator)
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/locator.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "safe_text",
+    (
+        "See https://example.com/docs/guide and http://example.org/a/b.",
+        "Markdown link: [guide](/docs/guide.md)",
+        "Asset link: [logo](/assets/logo.svg)",
+        "按 A/B/C 处理，普通中文/并列/表达。",
+    ),
+)
+def test_url_markdown_root_links_and_slash_expressions_are_not_paths(
+    tmp_path, safe_text
+):
+    _write(tmp_path, "docs/safe.md", safe_text)
+
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/safe.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "prod-test-" + "a" * 24,
+        "sample-live-" + "b" * 24,
+        "example-real-" + "c" * 24,
+        "example-token " + "d" * 24,
+    ),
+)
+def test_secret_values_merely_containing_placeholder_words_are_blocked(
+    tmp_path, value
+):
+    _write(tmp_path, "docs/key.txt", "api_" + "key = '" + value + "'")
+
+    assert "secret_pattern" in _codes(
+        audit_repository(tmp_path, tracked=("docs/key.txt",))
+    )
+
+
+def test_generic_quoted_token_and_bearer_credential_are_blocked(tmp_path):
+    generic = "to" + "ken = '" + "a" * 28 + "'"
+    bearer = "Authorization: " + "Bearer " + "b" * 28
+    _write(tmp_path, "docs/tokens.txt", generic + "\n" + bearer)
+
+    assert "secret_pattern" in _codes(
+        audit_repository(tmp_path, tracked=("docs/tokens.txt",))
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("<YOUR_API_KEY>", "example-token", "placeholder-token", "${API_KEY}"),
+)
+def test_only_strict_complete_placeholder_values_are_allowed(tmp_path, value):
+    _write(tmp_path, "docs/key.txt", "api_" + "key = '" + value + "'")
+
+    assert "secret_pattern" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/key.txt",))
+    )
+
+
+@pytest.mark.parametrize(
+    "token",
+    (
+        "github" + "_pat_" + "a" * 30,
+        "gh" + "p_" + "b" * 36,
+        "gl" + "pat-" + "c" * 24,
+    ),
+)
+def test_modern_repository_tokens_are_blocked(tmp_path, token):
+    _write(tmp_path, "docs/token.txt", token)
+
+    assert "secret_pattern" in _codes(
+        audit_repository(tmp_path, tracked=("docs/token.txt",))
+    )
+
+
+@pytest.mark.parametrize(
+    "email",
+    (
+        "teacher" + "@" + "school.example",
+        "Person.Name" + "@" + "Company.Example",
+    ),
+)
+def test_ordinary_personal_or_organization_emails_are_blocked(tmp_path, email):
+    _write(tmp_path, "docs/contact.md", "contact: " + email)
+
+    assert "identity_pattern" in _codes(
+        audit_repository(tmp_path, tracked=("docs/contact.md",))
+    )
+
+
+def test_github_noreply_and_exact_configured_public_contacts_are_allowed(tmp_path):
+    noreply = "210877483" + "+laisangsang@" + "users.noreply.github.com"
+    public_contact = "project-contact" + "@" + "example.org"
+    _write(
+        tmp_path,
+        "docs/contact.md",
+        noreply + "\n" + noreply.upper() + "\n" + public_contact,
+    )
+
+    issues = audit_repository(
+        tmp_path,
+        tracked=("docs/contact.md",),
+        allowlist={"public_contacts": [public_contact]},
+    )
+
+    assert "identity_pattern" not in _codes(issues)
+
+
+def test_public_contact_allowlist_is_exact_not_domain_wide(tmp_path):
+    public_contact = "project-contact" + "@" + "example.org"
+    other_contact = "other-contact" + "@" + "example.org"
+    _write(tmp_path, "docs/contact.md", other_contact)
+
+    issues = audit_repository(
+        tmp_path,
+        tracked=("docs/contact.md",),
+        allowlist={"public_contacts": [public_contact]},
+    )
+
+    assert "identity_pattern" in _codes(issues)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "docs/" + "safe" + chr(0x202E) + "txt.md",
+        "docs/" + "zero" + chr(0x200B) + "width.md",
+        "docs/" + "e" + chr(0x0301) + ".md",
+        "docs/ leading.md",
+        "docs/.hidden.md",
+        "docs/COM" + chr(0x00B9) + ".md",
+    ),
+)
+def test_unicode_format_non_nfc_and_edge_punctuation_paths_are_redacted(
+    tmp_path, relative
+):
+    issues = audit_repository(tmp_path, tracked=(relative,))
+
+    invalid = [issue for issue in issues if issue.code == "invalid_path"]
+    assert len(invalid) == 1
+    assert invalid[0].path == "<unsafe-path>"
+    assert relative not in json.dumps([item.to_dict() for item in issues])
+
+
+def test_casefold_path_collisions_are_redacted(tmp_path):
+    _write(tmp_path, "docs/Case.md", "safe")
+
+    issues = audit_repository(
+        tmp_path, tracked=("docs/Case.md", "docs/case.md")
+    )
+
+    invalid = [issue for issue in issues if issue.code == "invalid_path"]
+    assert invalid and all(issue.path == "<unsafe-path>" for issue in invalid)
+
+
+def test_staged_policy_cannot_be_hidden_by_a_safe_worktree_policy(tmp_path):
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    unsafe_policy = {
+        "schema_version": 1,
+        "allowed_top_level_directories": ["materials"],
+        "allowed_example_directory": "examples/original-mini-exam",
+        "allowed_root_files": [],
+        "forbidden_directories": [],
+        "forbidden_extensions": [],
+        "max_file_bytes": 2097152,
+        "private_terms": [],
+        "public_contacts": [],
+    }
+    policy_path = tmp_path / "config" / "public_release_allowlist.json"
+    policy_path.parent.mkdir(parents=True)
+    policy_path.write_text(json.dumps(unsafe_policy), encoding="utf-8")
+    _write(tmp_path, "materials/private.md", "safe")
+    subprocess.run(("git", "add", "--", "config", "materials"), cwd=tmp_path, check=True)
+    policy_path.write_text("{}", encoding="utf-8")
+
+    issues = audit_repository(tmp_path)
+
+    assert {"config_invalid", "forbidden_path"} <= _codes(issues)
