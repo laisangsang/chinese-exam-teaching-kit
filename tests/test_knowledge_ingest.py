@@ -6,6 +6,7 @@ from chinese_exam_kit.knowledge.ingest import (
     VerificationCase,
     evaluate_status,
 )
+from tests._host_samples import posix_path
 
 
 def one_case(**overrides):
@@ -60,7 +61,7 @@ def test_candidate_knowledge_rejects_absolute_source_locator():
                 "id": "original-exam",
                 "kind": "formal_exam",
                 "name": "原创试卷",
-                "locator": "/private/exam.pdf",
+                "locator": posix_path("private", "exam.pdf"),
             },
         )
 

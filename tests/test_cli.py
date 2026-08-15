@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from chinese_exam_kit.cli import main
+from tests._host_samples import file_uri, posix_path, unc_path, windows_path
 
 
 def test_cli_init_run_status_json_is_agent_neutral_and_redacted(tmp_path, capsys, monkeypatch):
@@ -107,10 +108,10 @@ def test_cli_never_echoes_posix_windows_or_unc_paths_from_exceptions(
     task.parent.mkdir(parents=True)
     task.write_text("{}", encoding="utf-8")
     messages = (
-        "failed at '/Users/Alice Smith/exam.pdf'",
-        r"failed at C:\Users\Alice Smith\exam.pdf",
-        r"failed at \\server\share\Alice Smith\exam.pdf",
-        "failed at file:///Users/Alice%20Smith/exam.pdf",
+        f"failed at '{posix_path('Users', 'person-a', 'exam.pdf')}'",
+        f"failed at {windows_path('Users', 'person-a', 'exam.pdf')}",
+        f"failed at {unc_path('server', 'share', 'person-a', 'exam.pdf')}",
+        f"failed at {file_uri('Users', 'person-a', 'exam.pdf')}",
     )
     for message in messages:
         monkeypatch.setattr(
@@ -124,7 +125,7 @@ def test_cli_never_echoes_posix_windows_or_unc_paths_from_exceptions(
 
 
 def test_cli_argument_errors_do_not_echo_an_unknown_path(capsys):
-    code = main(["--unknown", r"C:\Users\Alice Smith\exam.pdf"])
+    code = main(["--unknown", windows_path("Users", "person-a", "exam.pdf")])
 
     assert code == 2
     rendered = capsys.readouterr().err
@@ -142,9 +143,11 @@ def test_cli_accepts_equivalent_macos_var_alias_for_project_content(tmp_path, mo
         "# 原创讲评总览\n\n这是通过校验的原创教师讲评说明。\n", encoding="utf-8"
     )
     canonical = str(content)
-    if not canonical.startswith("/private/var/") or not Path("/var").is_symlink():
+    private_var = posix_path("private", "var") + "/"
+    var = posix_path("var") + "/"
+    if not canonical.startswith(private_var) or not Path(posix_path("var")).is_symlink():
         return
-    alias = canonical.replace("/private/var/", "/var/", 1)
+    alias = canonical.replace(private_var, var, 1)
 
     code = main(["validate", "--content", alias])
 

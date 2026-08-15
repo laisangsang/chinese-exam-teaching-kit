@@ -14,6 +14,7 @@ from chinese_exam_kit.pipeline.models import PipelineTask
 from chinese_exam_kit.pipeline.runner import PipelineRunner
 from chinese_exam_kit.pipeline.state import load_task, save_task
 from chinese_exam_kit.workspace import WorkspaceLayout
+from tests._host_samples import posix_path
 
 
 def _create_task(project: Path, *, media: bool = False) -> Path:
@@ -330,11 +331,12 @@ def test_tampered_waiting_validation_report_is_repaired_without_new_stage_event(
     runner.resume(task_path)
     before = load_task(task_path).stages["analysis"].events
     report = task_path.parent / "work_orders" / "analysis-validation.json"
-    report.write_text('{"leak":"/Users/Alice Smith/exam.pdf"}', encoding="utf-8")
+    leaked = posix_path("Users", "person-a", "exam.pdf")
+    report.write_text(json.dumps({"leak": leaked}), encoding="utf-8")
 
     runner.resume(task_path)
 
-    assert "/Users/" not in report.read_text(encoding="utf-8")
+    assert posix_path("Users") + "/" not in report.read_text(encoding="utf-8")
     assert load_task(task_path).stages["analysis"].events == before
 
 
@@ -786,10 +788,12 @@ def test_pipeline_lock_uses_no_follow_and_redacts_eloop(tmp_path, monkeypatch):
 def test_equivalent_macos_var_alias_task_path_is_accepted(tmp_path):
     task_path = _create_task(tmp_path)
     canonical = str(task_path)
-    if not canonical.startswith("/private/var/") or not Path("/var").is_symlink():
-        pytest.skip("macOS /var alias unavailable")
-    alias = Path(canonical.replace("/private/var/", "/var/", 1))
-    project_alias = Path(str(tmp_path).replace("/private/var/", "/var/", 1))
+    private_var = posix_path("private", "var") + "/"
+    var = posix_path("var") + "/"
+    if not canonical.startswith(private_var) or not Path(posix_path("var")).is_symlink():
+        pytest.skip(f"macOS {posix_path('var')} alias unavailable")
+    alias = Path(canonical.replace(private_var, var, 1))
+    project_alias = Path(str(tmp_path).replace(private_var, var, 1))
 
     summary = PipelineRunner(project_alias).resume(alias)
 

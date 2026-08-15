@@ -12,6 +12,7 @@ from chinese_exam_kit.content.validate import (
     validate_content_dir,
     validate_file,
 )
+from tests._host_samples import posix_path, unc_path, windows_path
 
 
 def _write(path: Path, text: str) -> Path:
@@ -462,7 +463,11 @@ def test_unknown_module_and_invalid_utf8_are_structured_without_absolute_paths(t
 
 @pytest.mark.parametrize(
     "module_id",
-    ("/Users/private/secret", r"C:\\private\\secret", r"\\\\server\\private"),
+    (
+        posix_path("Users", "person-a", "secret"),
+        windows_path("private", "secret"),
+        unc_path("server", "private"),
+    ),
 )
 def test_unknown_module_identifier_is_not_reflected_in_results(tmp_path, module_id):
     source = _write(tmp_path / "source.md", "# 原创内容\n")

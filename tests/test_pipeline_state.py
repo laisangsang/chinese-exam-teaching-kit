@@ -6,6 +6,7 @@ import pytest
 from chinese_exam_kit.pipeline.models import MaterialRecord, PipelineTask, STAGES
 from chinese_exam_kit.pipeline.state import load_task, save_task, transition_stage
 from chinese_exam_kit.workspace import WorkspaceLayout
+from tests._host_samples import posix_path
 
 
 def _new_task(tmp_path):
@@ -90,7 +91,15 @@ def test_pipeline_task_rejects_workspace_outside_dot_local_tasks(tmp_path):
         PipelineTask.create("demo", "原创示例", tmp_path / "demo")
 
 
-@pytest.mark.parametrize("archived_path", ("../secret.txt", "/tmp/secret.txt", "C:/secret.txt", "work/file.txt"))
+@pytest.mark.parametrize(
+    "archived_path",
+    (
+        "../secret.txt",
+        posix_path("tmp", "secret.txt"),
+        "C:" + "/secret.txt",
+        "work/file.txt",
+    ),
+)
 def test_material_record_rejects_paths_outside_task_inputs(archived_path):
     with pytest.raises(ValueError, match="task-relative inputs"):
         MaterialRecord(

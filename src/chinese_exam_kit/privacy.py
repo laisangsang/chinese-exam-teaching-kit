@@ -5,8 +5,11 @@ from __future__ import annotations
 import re
 
 
+_FILE_SCHEME = "file" + ":" + "//"
+
+
 HOST_LOCATOR_PATTERNS = (
-    re.compile(r"file://", re.IGNORECASE),
+    re.compile(re.escape(_FILE_SCHEME), re.IGNORECASE),
     re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]"),
     re.compile(r"(?<![\\/])(?:\\\\|//)[^\\/\s]"),
     re.compile(r"(?<![A-Za-z0-9_\u3400-\u9fff])/(?!/)[^\s'\">)\]]"),

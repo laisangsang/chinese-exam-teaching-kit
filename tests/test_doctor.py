@@ -2,17 +2,18 @@ import json
 
 from chinese_exam_kit.cli import main
 from chinese_exam_kit.doctor import Capability, DoctorReport, inspect_environment, render_report
+from tests._host_samples import posix_path, windows_path
 
 
 def test_report_redacts_home_and_username(tmp_path):
     report = DoctorReport(
         platform="macOS",
         python="3.12.4",
-        capabilities=(Capability("word", True, "core", str(tmp_path / "liyuxiang")),),
+        capabilities=(Capability("word", True, "core", str(tmp_path / "local-user")),),
     )
     text = render_report(report, redact=True)
     assert str(tmp_path) not in text
-    assert "liyuxiang" not in text
+    assert "local-user" not in text
 
 
 def test_report_redacts_windows_paths_with_spaces_without_erasing_context():
@@ -24,12 +25,14 @@ def test_report_redacts_windows_paths_with_spaces_without_erasing_context():
                 "word",
                 True,
                 "core",
-                r"stored at C:\Users\sampleuser\Exam Files\final report.docx; ready for use",
+                "stored at "
+                + windows_path("Users", "sampleuser", "Exam Files", "final report.docx")
+                + "; ready for use",
             ),
         ),
     )
     text = render_report(report, redact=True)
-    for secret in ("sampleuser", "Exam Files", "final report.docx", r"C:\Users"):
+    for secret in ("sampleuser", "Exam Files", "final report.docx", windows_path("Users")):
         assert secret not in text
     assert "ready for use" in text
 
@@ -43,12 +46,14 @@ def test_report_redacts_posix_paths_with_spaces_without_erasing_context():
                 "word",
                 True,
                 "core",
-                "stored at /Users/sampleuser/Exam Files/final report.docx; ready for use",
+                "stored at "
+                + posix_path("Users", "sampleuser", "Exam Files", "final report.docx")
+                + "; ready for use",
             ),
         ),
     )
     text = render_report(report, redact=True)
-    for secret in ("sampleuser", "Exam", "Files", "final", "report.docx", "/Users"):
+    for secret in ("sampleuser", "Exam", "Files", "final", "report.docx", posix_path("Users")):
         assert secret not in text
     assert "ready for use" in text
 
@@ -68,4 +73,4 @@ def test_doctor_json_output_is_machine_readable(capsys):
 def test_doctor_report_output_redacts_local_paths(capsys):
     assert main(["doctor", "--report"]) in {0, 1}
     output = capsys.readouterr().out
-    assert "/Users/" not in output
+    assert posix_path("Users") + "/" not in output

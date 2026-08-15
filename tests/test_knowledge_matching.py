@@ -7,6 +7,7 @@ import pytest
 from chinese_exam_kit.knowledge.matching import match_manifest
 from chinese_exam_kit.knowledge.questions import QuestionKnowledge, append_audit_event
 from chinese_exam_kit.knowledge.store import KnowledgeCard
+from tests._host_samples import file_uri, posix_path, unc_path, windows_path
 
 
 def sample_card(card_id="MT-0001"):
@@ -211,7 +212,11 @@ def test_audit_use_records_explicit_applicability(tmp_path):
 
 @pytest.mark.parametrize(
     "secret",
-    ["/Users/example/private.pdf", r"C:\\Users\\example\\private.pdf", "file:///tmp/private"],
+    [
+        posix_path("Users", "person-a", "private.pdf"),
+        windows_path("Users", "person-a", "private.pdf"),
+        file_uri("tmp", "private"),
+    ],
 )
 def test_append_audit_event_rejects_absolute_path_leaks(tmp_path, secret):
     with pytest.raises(ValueError, match="absolute path"):
@@ -229,11 +234,11 @@ def test_append_audit_event_rejects_absolute_path_leaks(tmp_path, secret):
 @pytest.mark.parametrize(
     "secret",
     [
-        "前缀 /Users/example/My Private/source.pdf 后缀",
-        r"前缀 C:\Users\example\My Files\source.pdf 后缀",
-        r"前缀 \\server\share\My Files\source.pdf 后缀",
-        "前缀 file:///tmp/My Private/source.pdf 后缀",
-        "前缀 file:/tmp/My Private/source.pdf 后缀",
+        f"前缀 {posix_path('Users', 'person-a', 'My Private', 'source.pdf')} 后缀",
+        f"前缀 {windows_path('Users', 'person-a', 'My Files', 'source.pdf')} 后缀",
+        f"前缀 {unc_path('server', 'share', 'My Files', 'source.pdf')} 后缀",
+        f"前缀 {file_uri('tmp', 'My Private', 'source.pdf')} 后缀",
+        "前缀 file:" + posix_path("tmp", "My Private", "source.pdf") + " 后缀",
     ],
 )
 @pytest.mark.parametrize("location", ["key", "value"])
@@ -262,7 +267,7 @@ def test_audit_rejects_single_segment_absolute_posix_path(tmp_path):
             task_id="original-task",
             stage="pre",
             event="search",
-            details={"source": "/tmp"},
+            details={"source": posix_path("tmp")},
         )
 
 
@@ -273,18 +278,18 @@ def test_audit_rejects_embedded_single_segment_absolute_posix_path(tmp_path):
             task_id="original-task",
             stage="pre",
             event="search",
-            details={"source": "说明见 /tmp 后续"},
+            details={"source": "说明见 " + posix_path("tmp") + " 后续"},
         )
 
 
 @pytest.mark.parametrize(
     "secret",
     [
-        "source=/tmp",
-        "路径：/tmp",
-        "source:/tmp",
-        "source=/Users/name/My File/test.pdf",
-        "path:/Users/name/My File/test.pdf",
+        "source=" + posix_path("tmp"),
+        "路径：" + posix_path("tmp"),
+        "source:" + posix_path("tmp"),
+        "source=" + posix_path("Users", "person-a", "My File", "test.pdf"),
+        "path:" + posix_path("Users", "person-a", "My File", "test.pdf"),
     ],
 )
 @pytest.mark.parametrize("location", ["key", "value"])

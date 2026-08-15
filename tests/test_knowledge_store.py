@@ -11,6 +11,7 @@ from chinese_exam_kit.knowledge.store import (
     search_cards,
     validate_library,
 )
+from tests._host_samples import posix_path, windows_path
 
 
 def _write_card(root: Path, *, card_id: str, title: str, body: str) -> Path:
@@ -114,7 +115,7 @@ def test_index_rejects_card_path_outside_library(tmp_path):
     _write_card(tmp_path, card_id="MT-0001", title="索引边界", body="只记录相对路径。")
     parsed = validate_library(tmp_path, contract).cards[0]
     escaped = type(parsed)(
-        path=Path("/private/knowledge/MT-0001.md"),
+        path=Path(posix_path("private", "knowledge", "MT-0001.md")),
         metadata=parsed.metadata,
         sections=parsed.sections,
         body=parsed.body,
@@ -131,7 +132,7 @@ def test_index_rejects_windows_absolute_card_path_on_any_platform(tmp_path):
     _write_card(tmp_path, card_id="MT-0001", title="索引边界", body="只记录相对路径。")
     parsed = validate_library(tmp_path, contract).cards[0]
     escaped = type(parsed)(
-        path=Path(r"C:\private\knowledge\MT-0001.md"),
+        path=Path(windows_path("private", "knowledge", "MT-0001.md")),
         metadata=parsed.metadata,
         sections=parsed.sections,
         body=parsed.body,
@@ -196,7 +197,7 @@ def test_absolute_source_locator_is_rejected_without_echoing_it(tmp_path):
     contract = load_contract(Path("config/knowledge_contract.json"))
     _write_card(tmp_path, card_id="MT-0001", title="路径边界", body="测试路径边界。")
     card_path = tmp_path / "cards" / "methods" / "MT-0001.md"
-    secret = "/Users/example/private/source.pdf"
+    secret = posix_path("Users", "person-a", "private", "source.pdf")
     card_path.write_text(
         card_path.read_text(encoding="utf-8").replace(
             "examples/original-mini-exam/README.md", secret

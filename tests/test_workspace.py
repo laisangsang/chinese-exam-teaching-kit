@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from chinese_exam_kit.workspace import WorkspaceLayout
+from tests._host_samples import posix_path
 
 
 def test_workspace_is_always_under_dot_local(tmp_path):
@@ -13,7 +14,9 @@ def test_workspace_is_always_under_dot_local(tmp_path):
     assert layout.inputs.is_dir()
 
 
-@pytest.mark.parametrize("slug", ("../escape", "nested/task", "/tmp/escape", ".", ""))
+@pytest.mark.parametrize(
+    "slug", ("../escape", "nested/task", posix_path("tmp", "escape"), ".", "")
+)
 def test_workspace_rejects_slugs_that_can_escape_task_root(tmp_path, slug):
     with pytest.raises(ValueError, match="slug"):
         WorkspaceLayout.create(tmp_path, slug)

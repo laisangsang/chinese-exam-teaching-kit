@@ -194,7 +194,7 @@ def test_build_all_redacts_directory_enumeration_errors(tmp_path, monkeypatch):
     content.mkdir()
 
     def fail_iterdir(path):
-        raise OSError(f"cannot enumerate {tmp_path}/private-content")
+        raise OSError(f"cannot enumerate {tmp_path / 'private-content'}")
 
     monkeypatch.setattr(Path, "iterdir", fail_iterdir)
     with pytest.raises(OSError, match="could not enumerate content directory") as error:
@@ -308,7 +308,7 @@ def test_temporary_output_creation_failure_is_path_redacted(tmp_path, monkeypatc
     source.write_text("# 原创\n", encoding="utf-8")
 
     def fail_mkstemp(*args, **kwargs):
-        raise OSError(f"cannot create {tmp_path}/private.partial")
+        raise OSError(f"cannot create {tmp_path / 'private.partial'}")
 
     monkeypatch.setattr(tempfile, "mkstemp", fail_mkstemp)
     with pytest.raises(OSError) as error:

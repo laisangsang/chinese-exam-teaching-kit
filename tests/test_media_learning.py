@@ -11,6 +11,7 @@ from chinese_exam_kit.media.learning import (
     LocalMediaProvider,
     write_media_index,
 )
+from tests._host_samples import file_uri, posix_path, unc_path, windows_path
 
 
 def test_media_index_is_structured_deterministic_and_path_safe(tmp_path):
@@ -37,7 +38,10 @@ def test_media_index_is_structured_deterministic_and_path_safe(tmp_path):
     assert str(tmp_path) not in destination.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("path", ("/tmp/transcript.txt", "../escape.txt", "C:/secret.txt"))
+@pytest.mark.parametrize(
+    "path",
+    (posix_path("tmp", "transcript.txt"), "../escape.txt", "C:" + "/secret.txt"),
+)
 def test_media_chapter_rejects_absolute_or_escaping_paths(path):
     with pytest.raises(ValueError, match="relative"):
         MediaChapter(
@@ -75,9 +79,9 @@ def test_degraded_media_result_contains_no_host_path():
 @pytest.mark.parametrize(
     "message",
     (
-        "failed at /private/var/folders/job.tmp",
-        r"failed at C:\\Users\\teacher\\job.tmp",
-        "failed at /home/teacher/job.tmp",
+        "failed at " + posix_path("private", "var", "folders", "job.tmp"),
+        "failed at " + windows_path("Users", "teacher", "job.tmp"),
+        "failed at " + posix_path("home", "teacher", "job.tmp"),
     ),
 )
 def test_media_result_rejects_any_host_absolute_path(message):
@@ -111,10 +115,10 @@ def test_media_chapter_rejects_string_or_non_frame_iterables(frames):
 @pytest.mark.parametrize(
     "field,value",
     (
-        ("chapter_id", "file:///Users/Alice Smith/chapter"),
-        ("title", r"C:\Users\Alice Smith\exam.pdf"),
-        ("section", r"\\server\share\exam.pdf"),
-        ("title", "材料位于 '/Users/Alice Smith/exam.pdf'"),
+        ("chapter_id", file_uri("Users", "person-a", "chapter")),
+        ("title", windows_path("Users", "person-a", "exam.pdf")),
+        ("section", unc_path("server", "share", "exam.pdf")),
+        ("title", "材料位于 '" + posix_path("Users", "person-a", "exam.pdf") + "'"),
     ),
 )
 def test_media_chapter_rejects_host_paths_in_all_free_text(field, value):

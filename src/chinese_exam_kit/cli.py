@@ -24,6 +24,7 @@ from chinese_exam_kit.pipeline.runner import (
     summarize,
 )
 from chinese_exam_kit.pipeline.state import load_task, save_task
+from chinese_exam_kit.release_guard import audit_repository
 from chinese_exam_kit.workspace import WorkspaceLayout
 
 
@@ -60,6 +61,11 @@ def _parser() -> argparse.ArgumentParser:
     build = commands.add_parser("build", help="validate and build Word documents")
     build.add_argument("--content", required=True)
     build.add_argument("--output", required=True)
+
+    release_audit = commands.add_parser(
+        "release-audit", help="check the tracked public release surface"
+    )
+    release_audit.add_argument("--json", action="store_true", dest="json_output")
     return parser
 
 
@@ -116,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
             manifest_path = _build(root, content, output)
             print(f"已生成 {_display_path(root, manifest_path)}")
             return 0
+        if args.command == "release-audit":
+            return _release_audit(root, args.json_output)
         parser.print_help()
         return 0
     except (ValueError, FileNotFoundError, UnicodeError):
@@ -137,6 +145,25 @@ def _doctor(args: argparse.Namespace) -> int:
     return 1 if any(
         not item.available and item.level == "core" for item in report.capabilities
     ) else 0
+
+
+def _release_audit(root: Path, json_output: bool) -> int:
+    issues = audit_repository(root)
+    if json_output:
+        print(
+            json.dumps(
+                [issue.to_dict() for issue in issues],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    else:
+        errors = sum(issue.level == "error" for issue in issues)
+        warnings = sum(issue.level == "warning" for issue in issues)
+        print(f"release audit: {errors} errors, {warnings} warnings")
+        for issue in issues:
+            print(f"- [{issue.level}] {issue.code}: {issue.path} — {issue.message}")
+    return 1 if any(issue.level == "error" for issue in issues) else 0
 
 
 def _init(root: Path, name: str, inputs: list[str]) -> int:
