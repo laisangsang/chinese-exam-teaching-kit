@@ -1,0 +1,177 @@
+{
+  "schema_version": 1,
+  "module_files": {
+    "01_阅读一_信息类文本详案.md": "reading_1",
+    "02_阅读二_文学类文本详案.md": "reading_2",
+    "03_阅读三_文言文详案.md": "classical_chinese",
+    "04_阅读四_古诗文详案.md": "poetry",
+    "05_语言文字运用详案.md": "language_use",
+    "06_作文审题与写作指导详案.md": "composition"
+  },
+  "validation": {
+    "minimum_section_characters": 6,
+    "standalone_placeholders": [
+      "TODO",
+      "TBD",
+      "待补充",
+      "略",
+      "同上"
+    ],
+    "evidence_layers": [
+      "官方评分参考",
+      "文本推导",
+      "教学拓展"
+    ],
+    "choice_options": [
+      "A",
+      "B",
+      "C",
+      "D"
+    ],
+    "option_evidence_fields": {
+      "原文位置": [
+        "原文位置",
+        "证据位置"
+      ],
+      "选项改写": [
+        "选项改写",
+        "选项概括"
+      ],
+      "正误判断": [
+        "正误判断",
+        "比较判断"
+      ],
+      "设误类型": [
+        "设误类型",
+        "错误类型"
+      ]
+    },
+    "subjective_steps": {
+      "审题": [
+        "审题"
+      ],
+      "证据": [
+        "证据",
+        "定位"
+      ],
+      "关系或整合": [
+        "关系",
+        "整合",
+        "关系/整合"
+      ],
+      "评分点": [
+        "评分点"
+      ],
+      "参考答案": [
+        "参考答案",
+        "答案示范"
+      ],
+      "失分诊断": [
+        "失分诊断",
+        "易错点"
+      ]
+    }
+  },
+  "modules": {
+    "reading_1": {
+      "label": "阅读一：信息类文本",
+      "requires_choice_evidence": true,
+      "requires_subjective_chain": true,
+      "required_sections": [
+        "选材与时代价值",
+        "逐段批注",
+        "层次与信息路径",
+        "多材料关系",
+        "核心观点与作者立场",
+        "全部试题精讲",
+        "逐选项证据",
+        "主观题答案生成",
+        "通用阅读方法"
+      ]
+    },
+    "reading_2": {
+      "label": "阅读二：文学类文本",
+      "requires_choice_evidence": true,
+      "requires_subjective_chain": true,
+      "required_sections": [
+        "作者与时代背景",
+        "逐段批注",
+        "情节与心理变化",
+        "人物形象",
+        "主旨情感与写作意图",
+        "艺术手法与实际效果",
+        "关键段落五维分析",
+        "全部试题精讲",
+        "逐选项证据",
+        "主观题评分点",
+        "可迁移答题模型"
+      ]
+    },
+    "classical_chinese": {
+      "label": "阅读三：文言文",
+      "requires_choice_evidence": true,
+      "requires_subjective_chain": true,
+      "required_sections": [
+        "全文逐句注释",
+        "重点字词拓展",
+        "特殊句式",
+        "全文逐句翻译",
+        "逐段内容与关系",
+        "全部试题精讲",
+        "翻译题采分点",
+        "迁移清单"
+      ]
+    },
+    "poetry": {
+      "label": "阅读四：古诗文",
+      "requires_choice_evidence": true,
+      "requires_subjective_chain": true,
+      "required_sections": [
+        "作者与作品背景",
+        "重点字词与意象典故",
+        "逐句翻译与赏析",
+        "层次与情感脉络",
+        "表现手法",
+        "全部试题精讲",
+        "整首诗综合赏析",
+        "同题材拓展",
+        "名篇名句默写"
+      ]
+    },
+    "language_use": {
+      "label": "语言文字运用",
+      "requires_choice_evidence": true,
+      "requires_subjective_chain": true,
+      "required_sections": [
+        "语段分层与每层大意",
+        "语境与语言风格",
+        "全部试题精讲",
+        "错别字",
+        "句子衔接",
+        "语病修改",
+        "词语理解",
+        "成语熟语拓展",
+        "通用检查顺序",
+        "课堂训练方法"
+      ]
+    },
+    "composition": {
+      "label": "作文",
+      "requires_choice_evidence": false,
+      "requires_subjective_chain": false,
+      "required_sections": [
+        "材料逐句拆解",
+        "主旨与写作任务",
+        "立意与审题风险",
+        "概念关系与论证边界",
+        "多种作文结构",
+        "结构详案",
+        "分类论据素材",
+        "素材运用边界",
+        "标题与语言表达",
+        "完整写作提纲",
+        "示范段落"
+      ]
+    }
+  }
+}
