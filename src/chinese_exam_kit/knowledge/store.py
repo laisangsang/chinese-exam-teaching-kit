@@ -116,21 +116,73 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+def _scan_card_tree_for_symlinks(cards_root: Path, root: Path) -> list[Issue]:
+    """Reject every symlink below cards without following its target."""
+    issues: list[Issue] = []
+    if cards_root.is_symlink():
+        return [
+            Issue(
+                "error",
+                "symlink_not_allowed",
+                "cards",
+                "symbolic links are not allowed in the card tree",
+            )
+        ]
+    if not cards_root.exists():
+        return issues
+
+    pending = [cards_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda item: item.name)
+        except OSError:
+            issues.append(
+                Issue(
+                    "error",
+                    "unreadable_path",
+                    _display_path(directory, root),
+                    "card directory cannot be read",
+                )
+            )
+            continue
+        for entry in entries:
+            if entry.is_symlink():
+                issues.append(
+                    Issue(
+                        "error",
+                        "symlink_not_allowed",
+                        _display_path(entry, root),
+                        "symbolic links are not allowed in the card tree",
+                    )
+                )
+                continue
+            try:
+                if entry.is_dir():
+                    pending.append(entry)
+            except OSError:
+                issues.append(
+                    Issue(
+                        "error",
+                        "unreadable_path",
+                        _display_path(entry, root),
+                        "card path cannot be inspected",
+                    )
+                )
+    return issues
+
+
 def _safe_card_paths(root: Path) -> tuple[list[Path], list[Issue]]:
-    """Discover cards without following a symlink outside the library root."""
+    """Discover cards only after proving the card tree contains no symlinks."""
     root = root.resolve()
     cards_root = root / "cards"
-    issues: list[Issue] = []
+    issues = _scan_card_tree_for_symlinks(cards_root, root)
     paths: list[Path] = []
-    if not cards_root.exists():
-        if cards_root.is_symlink():
-            issues.append(
-                Issue("error", "path_escape", "cards", "card path escapes the library")
-            )
+    if issues or not cards_root.exists():
         return paths, issues
     try:
         resolved_cards = cards_root.resolve(strict=True)
-    except OSError:
+    except (OSError, RuntimeError):
         issues.append(
             Issue(
                 "error",
@@ -149,9 +201,19 @@ def _safe_card_paths(root: Path) -> tuple[list[Path], list[Issue]]:
         issues.append(Issue("error", "unreadable_path", "cards", "card directory cannot be read"))
         return paths, issues
     for directory in directories:
+        if directory.is_symlink():
+            issues.append(
+                Issue(
+                    "error",
+                    "symlink_not_allowed",
+                    _display_path(directory, root),
+                    "symbolic links are not allowed in the card tree",
+                )
+            )
+            continue
         try:
             resolved_directory = directory.resolve(strict=True)
-        except OSError:
+        except (OSError, RuntimeError):
             issues.append(
                 Issue(
                     "error",
@@ -161,7 +223,7 @@ def _safe_card_paths(root: Path) -> tuple[list[Path], list[Issue]]:
                 )
             )
             continue
-        if not _inside(resolved_directory, root):
+        if not _inside(resolved_directory, resolved_cards):
             issues.append(
                 Issue(
                     "error",
@@ -186,11 +248,21 @@ def _safe_card_paths(root: Path) -> tuple[list[Path], list[Issue]]:
             )
             continue
         for path in candidates:
+            if path.is_symlink():
+                issues.append(
+                    Issue(
+                        "error",
+                        "symlink_not_allowed",
+                        _display_path(path, root),
+                        "symbolic links are not allowed in the card tree",
+                    )
+                )
+                continue
             if path.suffix != ".md":
                 continue
             try:
                 resolved_path = path.resolve(strict=True)
-            except OSError:
+            except (OSError, RuntimeError):
                 issues.append(
                     Issue(
                         "error",
@@ -200,7 +272,7 @@ def _safe_card_paths(root: Path) -> tuple[list[Path], list[Issue]]:
                     )
                 )
                 continue
-            if not _inside(resolved_path, root):
+            if not _inside(resolved_path, resolved_cards):
                 issues.append(
                     Issue(
                         "error",
@@ -665,6 +737,12 @@ def build_index(
     else:
         card_items = tuple(cards)
     base = Path(root) if root is not None else Path(".")
+    try:
+        resolved_base = base.resolve()
+    except (OSError, RuntimeError):
+        return _index_path_failure()
+    if _scan_card_tree_for_symlinks(resolved_base / "cards", resolved_base):
+        return _index_path_failure()
     entries: list[dict[str, Any]] = []
     for card in sorted(card_items, key=lambda item: item.card_id):
         relative_path = _index_card_path(card.path, base)
@@ -711,36 +789,39 @@ def _index_card_path(path: Path, base: Path) -> str | None:
         "\\" in raw_path
     ):
         return None
+    relative = PurePosixPath(raw_path)
+    if ".." in relative.parts:
+        return None
     try:
         resolved_root = base.resolve()
-        resolved_cards = (resolved_root / "cards").resolve()
-    except (OSError, RuntimeError):
-        return None
-    if not _inside(resolved_cards, resolved_root):
-        return None
-
-    if path.is_absolute():
-        try:
-            resolved_path = path.resolve()
-        except (OSError, RuntimeError):
+        lexical_cards = resolved_root / "cards"
+        if lexical_cards.is_symlink():
             return None
-    else:
-        relative = PurePosixPath(raw_path)
-        if ".." in relative.parts:
+        resolved_cards = lexical_cards.resolve()
+        if not _inside(resolved_cards, resolved_root):
             return None
-        try:
-            if len(relative.parts) >= 3 and relative.parts[0] == "cards":
-                resolved_path = (resolved_root / Path(*relative.parts)).resolve()
-            else:
-                resolved_path = path.resolve()
-        except (OSError, RuntimeError):
-            return None
-
-    try:
-        within_cards = resolved_path.relative_to(resolved_cards)
-    except ValueError:
+        if path.is_absolute():
+            lexical_path = path.absolute()
+        elif len(relative.parts) >= 3 and relative.parts[0] == "cards":
+            lexical_path = (resolved_root / Path(*relative.parts)).absolute()
+        else:
+            lexical_path = path.absolute()
+        within_cards = lexical_path.relative_to(lexical_cards)
+    except (OSError, RuntimeError, ValueError):
         return None
     if len(within_cards.parts) < 2 or within_cards.suffix != ".md":
+        return None
+
+    cursor = lexical_cards
+    for part in within_cards.parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return None
+    try:
+        resolved_path = lexical_path.resolve()
+    except (OSError, RuntimeError):
+        return None
+    if not _inside(resolved_path, resolved_cards):
         return None
     return PurePosixPath("cards", *within_cards.parts).as_posix()
 

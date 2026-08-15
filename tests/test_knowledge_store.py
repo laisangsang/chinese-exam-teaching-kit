@@ -585,16 +585,90 @@ def test_validate_library_rejects_symlink_escape_without_reading_target(tmp_path
         else:
             (root / "cards" / "methods").mkdir()
             (root / "cards" / "methods" / "MT-0001.md").symlink_to(outside_card)
-            (root / "index.json").write_text(
-                '{"schema_version":1,"generated_at":null,"cards":[]}\n',
-                encoding="utf-8",
-            )
     except (OSError, NotImplementedError):
         pytest.skip("symlink creation is unavailable")
 
     result = validate_library(root, load_contract(Path("config/knowledge_contract.json")))
 
     assert result.cards == ()
-    assert [issue.code for issue in result.errors] == ["path_escape"]
+    assert [issue.code for issue in result.errors] == ["symlink_not_allowed"]
     rendered = json.dumps([issue.to_dict() for issue in result.errors], ensure_ascii=False)
     assert str(outside) not in rendered
+
+
+@pytest.mark.parametrize("link_kind", ["file", "directory"])
+def test_validate_library_rejects_symlink_to_private_library_location_without_index(
+    tmp_path, link_kind
+):
+    if not hasattr(Path, "symlink_to"):
+        pytest.skip("symlinks are unavailable")
+    root = tmp_path / "knowledge"
+    (root / "cards").mkdir(parents=True)
+    try:
+        if link_kind == "directory":
+            private_dir = root / "private_dir"
+            private_dir.mkdir()
+            (private_dir / "private.md").write_text("not a public card", encoding="utf-8")
+            (root / "cards" / "methods").symlink_to(
+                private_dir, target_is_directory=True
+            )
+        else:
+            private_file = root / "private.md"
+            private_file.write_text("not a public card", encoding="utf-8")
+            (root / "cards" / "methods").mkdir()
+            (root / "cards" / "methods" / "MT-0001.md").symlink_to(private_file)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+
+    result = validate_library(root, load_contract(Path("config/knowledge_contract.json")))
+
+    assert result.cards == ()
+    assert [issue.code for issue in result.errors] == ["symlink_not_allowed"]
+    assert "private" not in result.errors[0].message
+
+
+def test_validate_library_rejects_symlink_to_target_inside_cards_without_index(tmp_path):
+    if not hasattr(Path, "symlink_to"):
+        pytest.skip("symlinks are unavailable")
+    root = tmp_path / "knowledge"
+    methods = root / "cards" / "methods"
+    internal = root / "cards" / "internal"
+    methods.mkdir(parents=True)
+    internal.mkdir()
+    target = internal / "target.txt"
+    target.write_text("must not be read as a knowledge card", encoding="utf-8")
+    try:
+        (methods / "MT-0001.md").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+
+    result = validate_library(root, load_contract(Path("config/knowledge_contract.json")))
+
+    assert result.cards == ()
+    assert [issue.code for issue in result.errors] == ["symlink_not_allowed"]
+
+
+def test_build_index_rejects_manual_card_path_through_internal_symlink(tmp_path):
+    if not hasattr(Path, "symlink_to"):
+        pytest.skip("symlinks are unavailable")
+    contract = load_contract(Path("config/knowledge_contract.json"))
+    target = _write_card(
+        tmp_path, card_id="MT-0001", title="真实卡片", body="索引不得走符号链接。"
+    )
+    alias = target.with_name("MT-ALIAS.md")
+    try:
+        alias.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+    parsed = parse_card(target)
+    manual = type(parsed)(
+        path=alias,
+        metadata=parsed.metadata,
+        sections=parsed.sections,
+        body=parsed.body,
+    )
+
+    result = build_index((manual,), contract, tmp_path)
+
+    assert [issue.code for issue in result.errors] == ["invalid_card_path"]
+    assert result.index is None

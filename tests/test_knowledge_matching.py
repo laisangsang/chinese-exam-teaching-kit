@@ -277,6 +277,33 @@ def test_audit_rejects_embedded_single_segment_absolute_posix_path(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "source=/tmp",
+        "路径：/tmp",
+        "source:/tmp",
+        "source=/Users/name/My File/test.pdf",
+        "path:/Users/name/My File/test.pdf",
+    ],
+)
+@pytest.mark.parametrize("location", ["key", "value"])
+def test_audit_rejects_posix_paths_after_field_separators(tmp_path, secret, location):
+    details = {secret: "safe"} if location == "key" else {"source": secret}
+
+    with pytest.raises(ValueError, match="absolute path") as captured:
+        append_audit_event(
+            tmp_path,
+            task_id="original-task",
+            stage="pre",
+            event="search",
+            details=details,
+        )
+
+    assert secret not in str(captured.value)
+    assert not (tmp_path / "audit" / "original-task.jsonl").exists()
+
+
 @pytest.mark.parametrize("expression", ["按 A / B / C 三步", "普通中文/并列/表达"])
 def test_audit_allows_non_path_slash_expressions(tmp_path, expression):
     path = append_audit_event(

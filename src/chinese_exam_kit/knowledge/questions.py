@@ -17,7 +17,7 @@ from typing import Any
 _FILE_URI = re.compile(r"(?i)file:[/\\]")
 _WINDOWS_DRIVE_PATH = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Z]:[\\/]")
 _UNC_PATH = re.compile(r"(?<!\\)\\\\[^\\\r\n]+\\")
-_POSIX_PATH_TOKEN = re.compile(r"(?:^|[\s(\[{'\"])/(?![\s/])")
+_POSIX_PATH_TOKEN = re.compile(r"(?:^|[\s(\[{'\"=:：])/(?![\s/])")
 
 
 @dataclass(frozen=True)
