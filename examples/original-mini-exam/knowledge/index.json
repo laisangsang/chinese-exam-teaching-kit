@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "generated_at": null,
+  "cards": [
+    {
+      "id": "MT-0001",
+      "title": "主观题六步答案生成链",
+      "card_type": "method",
+      "status": "candidate",
+      "risk_level": "normal",
+      "modules": [
+        "classical_chinese",
+        "language_use",
+        "poetry",
+        "reading_1",
+        "reading_2"
+      ],
+      "question_types": [
+        "subjective_answer_generation"
+      ],
+      "abilities": [
+        "error_diagnosis",
+        "evidence_location",
+        "scoring_alignment",
+        "task_parsing"
+      ],
+      "path": "cards/methods/MT-0001.md"
+    },
+    {
+      "id": "OV-0001",
+      "title": "多板块共用的证据边界总览",
+      "card_type": "overview",
+      "status": "candidate",
+      "risk_level": "normal",
+      "modules": [
+        "classical_chinese",
+        "composition",
+        "language_use",
+        "poetry",
+        "reading_1",
+        "reading_2"
+      ],
+      "question_types": [
+        "answer_generation",
+        "evidence_boundary"
+      ],
+      "abilities": [
+        "boundary_control",
+        "evidence_location",
+        "teaching_transfer"
+      ],
+      "path": "cards/overviews/OV-0001.md"
+    },
+    {
+      "id": "QT-0001",
+      "title": "多材料指标解释题",
+      "card_type": "question_type",
+      "status": "candidate",
+      "risk_level": "normal",
+      "modules": [
+        "reading_1"
+      ],
+      "question_types": [
+        "multi_material_metric_interpretation"
+      ],
+      "abilities": [
+        "causal_boundary",
+        "cross_material_integration",
+        "unit_check"
+      ],
+      "path": "cards/question-types/QT-0001.md"
+    }
+  ]
+}
