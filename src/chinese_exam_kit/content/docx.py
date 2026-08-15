@@ -8,6 +8,8 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -21,7 +23,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor, Twips
 
 
-DEFAULT_STYLE_PATH = Path(__file__).resolve().parents[3] / "config" / "docx_style.json"
+DEFAULT_STYLE_PATH = files("chinese_exam_kit").joinpath("resources/docx_style.json")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _LIST_RE = re.compile(r"^(\s*)([-+*]|\d+[.)])\s+(.+?)\s*$")
 _TABLE_RULE_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$")
@@ -29,12 +31,27 @@ _INLINE_RE = re.compile(r"(\*\*.+?\*\*|`[^`]+`|(?<!\*)\*[^*\n]+\*(?!\*))")
 
 
 @dataclass(frozen=True)
+class ListItem:
+    level: int
+    text: str
+    marker: str
+
+    @property
+    def ordered(self) -> bool:
+        return self.marker[0].isdigit()
+
+    @property
+    def start(self) -> int:
+        match = re.match(r"\d+", self.marker)
+        return int(match.group(0)) if match else 1
+
+
+@dataclass(frozen=True)
 class Block:
     kind: str
     text: str = ""
     level: int = 0
-    ordered: bool = False
-    items: tuple[tuple[int, str], ...] = ()
+    items: tuple[ListItem, ...] = ()
     rows: tuple[tuple[str, ...], ...] = ()
 
 
@@ -110,16 +127,22 @@ def parse_markdown(text: str) -> list[Block]:
         list_match = _LIST_RE.match(line)
         if list_match:
             flush()
-            ordered = list_match.group(2)[0].isdigit()
-            items: list[tuple[int, str]] = []
+            items: list[ListItem] = []
+            level_formats: dict[int, bool] = {}
             while index < len(lines):
                 match = _LIST_RE.match(lines[index])
-                if match is None or match.group(2)[0].isdigit() != ordered:
+                if match is None:
                     break
                 indent = len(match.group(1).replace("\t", "    "))
-                items.append((min(indent // 2, 8), match.group(3)))
+                level = min(indent // 2, 8)
+                marker = match.group(2)
+                ordered = marker[0].isdigit()
+                if level in level_formats and level_formats[level] != ordered:
+                    break
+                level_formats[level] = ordered
+                items.append(ListItem(level=level, text=match.group(3), marker=marker))
                 index += 1
-            blocks.append(Block("list", ordered=ordered, items=tuple(items)))
+            blocks.append(Block("list", items=tuple(items)))
             continue
         paragraph.append(line)
         index += 1
@@ -127,15 +150,21 @@ def parse_markdown(text: str) -> list[Block]:
     return blocks
 
 
-def _load_style(path: Path) -> Mapping[str, Any]:
-    path = Path(path)
-    _reject_symlink_chain(path, role="style config")
+def _load_style(path: Path | Traversable | str) -> Mapping[str, Any]:
+    if isinstance(path, (str, os.PathLike)):
+        path = Path(path)
+        _reject_symlink_chain(path, role="style config")
+    name = getattr(path, "name", "docx_style.json")
     if not path.is_file():
-        raise ValueError(f"Word style config is unavailable: {path.name}")
+        raise ValueError(f"Word style config is unavailable: {name}")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise ValueError(f"Word style config is unreadable: {path.name}") from None
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise ValueError(f"Word style config is unreadable: {name}") from None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise ValueError(f"Word style config is unreadable: {name}") from None
     if not isinstance(data, dict) or data.get("schema_version") != 1:
         raise ValueError("Word style config schema_version must be 1")
     try:
@@ -353,7 +382,9 @@ def _append_inline(paragraph, text: str, token: Mapping[str, Any], *, heading: b
         _font_run(run, token, heading=heading)
 
 
-def _new_numbering(doc: DocumentObject, ordered: bool, token: Mapping[str, Any]) -> int:
+def _new_numbering(
+    doc: DocumentObject, items: Sequence[ListItem], token: Mapping[str, Any]
+) -> int:
     root = doc.part.numbering_part.element
     abstract_ids = [int(item.get(qn("w:abstractNumId"))) for item in root.findall(qn("w:abstractNum"))]
     num_ids = [int(item.get(qn("w:numId"))) for item in root.findall(qn("w:num"))]
@@ -365,11 +396,16 @@ def _new_numbering(doc: DocumentObject, ordered: bool, token: Mapping[str, Any])
     multilevel.set(qn("w:val"), "multilevel")
     abstract.append(multilevel)
     list_token = token["list"]
+    first_at_level: dict[int, ListItem] = {}
+    for item in items:
+        first_at_level.setdefault(item.level, item)
     for level in range(9):
+        first = first_at_level.get(level)
+        ordered = first.ordered if first is not None else False
         level_node = OxmlElement("w:lvl")
         level_node.set(qn("w:ilvl"), str(level))
         start = OxmlElement("w:start")
-        start.set(qn("w:val"), "1")
+        start.set(qn("w:val"), str(first.start if first is not None else 1))
         fmt = OxmlElement("w:numFmt")
         fmt.set(qn("w:val"), "decimal" if ordered else "bullet")
         label = OxmlElement("w:lvlText")
@@ -536,11 +572,11 @@ def _append_blocks(doc: DocumentObject, blocks: Iterable[Block], token: Mapping[
             paragraph = doc.add_paragraph(style=_callout_style(block.text))
             _append_inline(paragraph, block.text, token)
         elif block.kind == "list":
-            num_id = _new_numbering(doc, block.ordered, token)
-            for level, item in block.items:
-                paragraph = doc.add_paragraph(style=_callout_style(item))
-                _number_paragraph(paragraph, num_id, level)
-                _append_inline(paragraph, item, token)
+            num_id = _new_numbering(doc, block.items, token)
+            for item in block.items:
+                paragraph = doc.add_paragraph(style=_callout_style(item.text))
+                _number_paragraph(paragraph, num_id, item.level)
+                _append_inline(paragraph, item.text, token)
         elif block.kind == "table":
             _add_table(doc, block.rows, token)
 
@@ -594,7 +630,7 @@ def build_one(
     source: Path,
     destination: Path,
     *,
-    style_path: Path = DEFAULT_STYLE_PATH,
+    style_path: Path | Traversable = DEFAULT_STYLE_PATH,
 ) -> Path:
     """Build one Word guide without exposing caller paths in failures."""
 
@@ -631,7 +667,7 @@ def build_all(
     content_dir: Path,
     output_dir: Path,
     *,
-    style_path: Path = DEFAULT_STYLE_PATH,
+    style_path: Path | Traversable = DEFAULT_STYLE_PATH,
 ) -> list[Path]:
     """Build direct Markdown children in stable filename order."""
 
@@ -641,10 +677,21 @@ def build_all(
     _reject_symlink_chain(output_dir, role="output directory")
     if not content_dir.is_dir():
         raise FileNotFoundError(f"content directory is unavailable: {content_dir.name}")
-    sources = sorted(
-        (path for path in content_dir.iterdir() if path.suffix.lower() == ".md" and path.is_file() and not path.is_symlink()),
-        key=lambda path: path.name,
-    )
+    try:
+        sources = sorted(
+            (
+                path
+                for path in content_dir.iterdir()
+                if path.suffix.lower() == ".md"
+                and path.is_file()
+                and not path.is_symlink()
+            ),
+            key=lambda path: path.name,
+        )
+    except OSError:
+        raise OSError(
+            f"could not enumerate content directory: {content_dir.name}"
+        ) from None
     if not sources:
         raise FileNotFoundError(f"no Markdown sources found in: {content_dir.name}")
     outputs: list[Path] = []

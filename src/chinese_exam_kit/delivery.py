@@ -15,6 +15,8 @@ VISUAL_STATUSES = frozenset({"not_run", "evidence_ready", "passed", "failed"})
 
 
 def _relative_paths(values: Iterable[str], *, field: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise ValueError(f"{field} paths must be a non-string iterable")
     normalized: set[str] = set()
     for raw in values:
         if not isinstance(raw, str) or not raw or "\\" in raw:

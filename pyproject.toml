@@ -15,4 +15,4 @@ dev = ["pytest>=8,<10", "build>=1.2,<2"]
 cekit = "chinese_exam_kit.cli:main"
 
 [tool.setuptools.package-data]
-chinese_exam_kit = ["extract/*.swift"]
+chinese_exam_kit = ["extract/*.swift", "resources/*.json"]

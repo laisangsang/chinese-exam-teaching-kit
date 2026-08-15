@@ -49,6 +49,12 @@ def test_manifest_rejects_unknown_status_and_absolute_or_parent_paths(tmp_path):
         DeliveryManifest(outputs=("../guide.docx",))
 
 
+@pytest.mark.parametrize("value", ("guide.docx", b"guide.docx"))
+def test_manifest_rejects_scalar_path_iterables(value):
+    with pytest.raises(ValueError, match="iterable"):
+        DeliveryManifest(outputs=value)
+
+
 def test_manual_review_requires_signature_time_and_evidence():
     manifest = DeliveryManifest.automatic(
         outputs=("output/guide.docx",), evidence=("tmp/render/page-1.png",)

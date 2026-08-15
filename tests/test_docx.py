@@ -8,7 +8,14 @@ import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
-from chinese_exam_kit.content.docx import Block, build_all, build_one, parse_markdown
+from chinese_exam_kit.content.docx import (
+    Block,
+    DEFAULT_STYLE_PATH,
+    ListItem,
+    build_all,
+    build_one,
+    parse_markdown,
+)
 
 
 STYLE_PATH = Path("config/docx_style.json")
@@ -29,8 +36,20 @@ def test_parse_markdown_keeps_editable_block_structure():
     assert blocks == [
         Block("heading", text="原创讲评", level=1),
         Block("paragraph", text="普通段落含 **重点** 与 `术语`。"),
-        Block("list", ordered=False, items=((0, "先定位证据"), (0, "再组织答案"))),
-        Block("list", ordered=True, items=((0, "审题"), (0, "核验"))),
+        Block(
+            "list",
+            items=(
+                ListItem(level=0, text="先定位证据", marker="-"),
+                ListItem(level=0, text="再组织答案", marker="-"),
+            ),
+        ),
+        Block(
+            "list",
+            items=(
+                ListItem(level=0, text="审题", marker="1."),
+                ListItem(level=0, text="核验", marker="2."),
+            ),
+        ),
         Block("table", rows=(("环节", "任务"), ("课前", "核对材料"))),
     ]
 
@@ -115,6 +134,19 @@ def test_style_config_is_resolved_into_explicit_a4_ooxml(tmp_path):
             assert int(cell._tc.tcPr.tcW.get(qn("w:w"))) == grid_widths[index]
 
 
+def test_default_style_is_a_packaged_resource_and_matches_public_config(tmp_path):
+    source = tmp_path / "default-style.md"
+    destination = tmp_path / "default-style.docx"
+    source.write_text("# 默认配置\n\n正文。\n", encoding="utf-8")
+
+    build_one(source, destination)
+
+    assert destination.is_file()
+    assert json.loads(DEFAULT_STYLE_PATH.read_text(encoding="utf-8")) == json.loads(
+        STYLE_PATH.read_text(encoding="utf-8")
+    )
+
+
 def test_build_all_is_deterministic_and_only_builds_direct_markdown_children(tmp_path):
     content = tmp_path / "content"
     output = tmp_path / "output"
@@ -129,6 +161,46 @@ def test_build_all_is_deterministic_and_only_builds_direct_markdown_children(tmp
 
     assert [path.name for path in outputs] == ["a.docx", "b.docx"]
     assert all(path.is_file() for path in outputs)
+
+
+def test_ordered_list_keeps_start_and_parent_continuity_across_nested_bullet(tmp_path):
+    source = tmp_path / "lists.md"
+    source.write_text(
+        "# 原创列表\n\n5. 第五项\n6. 第六项\n\n"
+        "1. 父项\n  - 子项\n2. 后项\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "lists.docx"
+
+    blocks = parse_markdown(source.read_text(encoding="utf-8"))
+    assert blocks[1].items[0] == ListItem(level=0, text="第五项", marker="5.")
+    assert [item.marker for item in blocks[2].items] == ["1.", "-", "2."]
+
+    build_one(source, destination, style_path=STYLE_PATH)
+    document = Document(destination)
+    list_paragraphs = [p for p in document.paragraphs if p.text in {"第五项", "第六项", "父项", "子项", "后项"}]
+    first_num_id = list_paragraphs[0]._p.pPr.numPr.numId.val
+    assert list_paragraphs[1]._p.pPr.numPr.numId.val == first_num_id
+    mixed_num_ids = {p._p.pPr.numPr.numId.val for p in list_paragraphs[2:]}
+    assert len(mixed_num_ids) == 1
+    assert [p._p.pPr.numPr.ilvl.val for p in list_paragraphs[2:]] == [0, 1, 0]
+    numbering_xml = _xml(destination, "word/numbering.xml")
+    assert '<w:start w:val="5"' in numbering_xml
+
+
+def test_build_all_redacts_directory_enumeration_errors(tmp_path, monkeypatch):
+    content = tmp_path / "private-content"
+    output = tmp_path / "output"
+    content.mkdir()
+
+    def fail_iterdir(path):
+        raise OSError(f"cannot enumerate {tmp_path}/private-content")
+
+    monkeypatch.setattr(Path, "iterdir", fail_iterdir)
+    with pytest.raises(OSError, match="could not enumerate content directory") as error:
+        build_all(content, output, style_path=STYLE_PATH)
+
+    assert str(tmp_path) not in str(error.value)
 
 
 def test_build_one_rejects_symlink_input_and_output_without_exposing_absolute_paths(tmp_path):
