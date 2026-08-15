@@ -764,29 +764,38 @@ def _mask_safe_path_contexts(text: str) -> str:
         masked[match.start() : match.end()] = [True] * (match.end() - match.start())
 
     markdown_link = re.compile(
-        r"!?\[[^\]\r\n]*\]\(\s*([^\s)]+)(?:\s+[^)\r\n]*)?\)"
+        r"!?\[[^\]\r\n]*\]\([ \t]*"
+        r"(?P<destination><[^<>\r\n]*>|[^\s()<>\r\n]+)"
+        r"(?:[ \t]+(?P<title>\"[^\"\r\n]*\"|'[^'\r\n]*'|\([^()\r\n]*\)))?"
+        r"[ \t]*\)"
     )
     for match in markdown_link.finditer(text):
-        destination = match.group(1)
+        destination = match.group("destination")
         if _safe_markdown_root_destination(destination):
-            start, end = match.span(1)
+            start, end = match.span("destination")
             masked[start:end] = [True] * (end - start)
     return "".join(" " if hidden else character for character, hidden in zip(text, masked))
 
 
 def _safe_markdown_root_destination(destination: str) -> bool:
+    if destination.startswith("<") or destination.endswith(">"):
+        if not (destination.startswith("<") and destination.endswith(">")):
+            return False
+        destination = destination[1:-1]
+        if not destination or "<" in destination or ">" in destination:
+            return False
+        if any(character.isspace() for character in destination):
+            return False
     if not destination.startswith("/") or destination.startswith("//"):
         return False
-    if "\\" in destination or any(
-        unicodedata.category(character) == "Cf" for character in destination
-    ):
+    decoded = _bounded_destination_decode(destination)
+    if decoded is None:
         return False
-    path = destination.split("#", 1)[0].split("?", 1)[0]
-    decoded = unquote(path)
-    if not decoded.startswith("/") or unicodedata.normalize("NFC", decoded) != decoded:
+    path = decoded.split("#", 1)[0].split("?", 1)[0]
+    if not path.startswith("/") or path.startswith("//"):
         return False
-    parts = tuple(part for part in decoded[1:].split("/") if part)
-    if not parts or any(part in {".", ".."} for part in parts):
+    parts = tuple(path[1:].split("/"))
+    if not parts or any(not part or part in {".", ".."} for part in parts):
         return False
     allowed_roots = {
         ".codebuddy",
@@ -812,6 +821,61 @@ def _safe_markdown_root_destination(destination: str) -> bool:
             or re.fullmatch(r"README(?:\.[A-Za-z0-9_-]+)?\.md", parts[0])
         )
     )
+
+
+def _bounded_destination_decode(value: str, *, maximum_rounds: int = 4) -> str | None:
+    current = value
+    for _ in range(maximum_rounds):
+        if not _safe_destination_decode_state(current):
+            return None
+        try:
+            decoded = unquote(current, encoding="utf-8", errors="strict")
+        except UnicodeError:
+            return None
+        if decoded == current:
+            return current
+        current = decoded
+
+    if not _safe_destination_decode_state(current):
+        return None
+    try:
+        next_value = unquote(current, encoding="utf-8", errors="strict")
+    except UnicodeError:
+        return None
+    if next_value != current:
+        return None
+    return current
+
+
+def _safe_destination_decode_state(value: str) -> bool:
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return False
+    if "\\" in value or value.startswith("//"):
+        return False
+    if unicodedata.normalize("NFC", value) != value:
+        return False
+    if any(
+        ord(character) < 32
+        or ord(character) == 127
+        or unicodedata.category(character) == "Cf"
+        for character in value
+    ):
+        return False
+    if re.search(r"(?i)(?<![A-Za-z])file:[\\/]{1,3}", value):
+        return False
+    if re.search(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]", value):
+        return False
+    if re.search(r"(?<!:)//[A-Za-z0-9._-]+(?:/|$)", value):
+        return False
+    sensitive_roots = (
+        "Applications|Library|Users|Volumes|data|etc|home|mnt|opt|private|"
+        "root|srv|tmp|usr|var|workspace"
+    )
+    if re.search(
+        rf"(?i)(?:^|[=?#&])/(?:{sensitive_roots})(?:/|$)", value
+    ):
+        return False
+    return not re.search(r"(?:^|[/=?#&])\.\.(?:[/=?#&]|$)", value)
 
 
 def _contains_secret(text: str) -> bool:

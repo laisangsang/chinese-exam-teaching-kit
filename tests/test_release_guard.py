@@ -747,3 +747,141 @@ def test_blockquote_text_and_relative_links_are_safe_but_quoted_paths_are_not(
     assert "absolute_path" in _codes(
         audit_repository(tmp_path, tracked=("docs/quote.md",))
     )
+
+
+@pytest.mark.parametrize(
+    "encoded_component",
+    (
+        "%25" + "2e" + "%25" + "2e",
+        "%2525" + "2E" + "%2525" + "2e",
+        "%2E" + "%2e",
+        "%252525" + "2e" + "%252525" + "2e",
+    ),
+)
+def test_nested_percent_encoded_markdown_traversal_is_never_masked(
+    tmp_path, encoded_component
+):
+    destination = _generic_posix(
+        "src", encoded_component, "Users", "person-a", "private.md"
+    )
+    _write(tmp_path, "docs/links.md", "[不安全](" + destination + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "encoded_component",
+    ("%", "%2", "%GG", "%2525252525" + "2e"),
+)
+def test_malformed_or_not_stably_decoded_destination_is_not_masked(
+    tmp_path, encoded_component
+):
+    destination = _generic_posix("src", encoded_component, "private.md")
+    _write(tmp_path, "docs/links.md", "[不确定](" + destination + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "encoded_component",
+    (
+        "%25" + "00",
+        "file%25" + "3A%25" + "2F%25" + "2FUsers",
+        "%25" + "5CUsers",
+        "%25" + "2F%25" + "2Fserver",
+    ),
+)
+def test_nested_encoded_control_and_host_path_forms_are_not_masked(
+    tmp_path, encoded_component
+):
+    destination = _generic_posix("src", encoded_component, "private.md")
+    _write(tmp_path, "docs/links.md", "[不安全](" + destination + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    (
+        "?cache=%25" + "2FUsers%25" + "2Fperson-a",
+        "#target=file%25" + "3A%25" + "2F%25" + "2FUsers",
+        "?target=C%25" + "3A%25" + "2Fprivate",
+    ),
+)
+def test_encoded_host_paths_in_destination_suffixes_are_not_masked(
+    tmp_path, suffix
+):
+    destination = _generic_posix("src", "module.py") + suffix
+    _write(tmp_path, "docs/links.md", "[不安全](" + destination + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+def test_percent_encoded_chinese_public_markdown_path_is_allowed(tmp_path):
+    encoded_name = "%E4%B8%AD%E6%96%87" + ".md"
+    destination = _generic_posix("docs", encoded_name)
+    _write(tmp_path, "docs/links.md", "[中文说明](" + destination + ")")
+
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "destination",
+    (
+        _generic_posix("src", "chinese_exam_kit", "cli.py"),
+        _generic_posix("examples", "original-mini-exam", "README.md"),
+    ),
+)
+def test_commonmark_angle_destinations_for_public_roots_are_allowed(
+    tmp_path, destination
+):
+    markdown = "[源码](<" + destination + ">)"
+    _write(tmp_path, "docs/links.md", markdown)
+
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    (
+        _generic_posix("src", "..", "Users", "person-a", "private.md"),
+        _generic_posix("src", "%252e%252e", "Users", "private.md"),
+        _generic_posix("src", "space here", "file.py"),
+        _generic_posix("src", "nested") + "<extra>",
+        _generic_posix("src", "escaped") + "\\" + "name.py",
+    ),
+)
+def test_unsafe_or_ambiguous_angle_destinations_are_not_masked(tmp_path, inner):
+    _write(tmp_path, "docs/links.md", "[不安全](<" + inner + ">)")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+def test_angle_destination_title_is_strict_and_never_masks_title_paths(tmp_path):
+    destination = _generic_posix("src", "chinese_exam_kit", "cli.py")
+    safe = "[源码](<" + destination + '> "源码")'
+    _write(tmp_path, "docs/links.md", safe)
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+    title_path = _generic_posix("Users", "person-a", "private.md")
+    unsafe = "[源码](<" + destination + '> "' + title_path + '")'
+    _write(tmp_path, "docs/links.md", unsafe)
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
