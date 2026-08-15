@@ -949,3 +949,74 @@ def test_relative_percent_encoded_markdown_filename_is_allowed(tmp_path, angle):
     assert "absolute_path" not in _codes(
         audit_repository(tmp_path, tracked=("docs/links.md",))
     )
+
+
+@pytest.mark.parametrize(
+    "inner",
+    (
+        "%2F" + "Users%2Fperson-a%2Fprivate file.md",
+        "C%3A%2F" + "Users%2Fprivate file.md",
+        "file%3A%2F%2F%2F" + "Users%2Fprivate file.md",
+        "%2e%2e%2F" + "Users%2Fprivate file.md",
+        "guide%5C" + "private file.md",
+        "guide%250A" + "private file.md",
+        "guide%" + "GG private file.md",
+        "%25252525252F" + "Users%2Fprivate file.md",
+        "guide" + "\\" + "private file.md",
+        "guide" + "\t" + "private file.md",
+    ),
+)
+def test_spaced_angle_destinations_are_classified_before_left_unmasked(
+    tmp_path, inner
+):
+    _write(tmp_path, "docs/links.md", "[不安全](<" + inner + ">)")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "url_path",
+    (
+        "docs/%" + "0Aprivate",
+        "docs/%" + "5Cprivate",
+        "docs/%" + "2F..%2Fprivate",
+        "docs/%" + "GGprivate",
+        "docs/%25252525252F" + "private",
+        "docs/search?q=%2F..%2Fprivate",
+        "docs/page#target=%25" + "0Aprivate",
+    ),
+)
+@pytest.mark.parametrize("angle", (False, True))
+def test_http_markdown_destinations_are_validated_before_masking(
+    tmp_path, url_path, angle
+):
+    destination = "https://" + "example.com/" + url_path
+    rendered = "<" + destination + ">" if angle else destination
+    _write(tmp_path, "docs/links.md", "[不安全](" + rendered + ")")
+
+    assert "absolute_path" in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    (
+        "%E4%B8%AD%E6%96%87",
+        "C:" + "/guide",
+        "search?q=%E4%B8%AD%E6%96%87&section=one%2Ftwo",
+    ),
+)
+@pytest.mark.parametrize("angle", (False, True))
+def test_safe_percent_encoded_http_markdown_destinations_are_allowed(
+    tmp_path, suffix, angle
+):
+    destination = "https://" + "example.com/" + suffix
+    rendered = "<" + destination + ">" if angle else destination
+    _write(tmp_path, "docs/links.md", "[链接](" + rendered + ")")
+
+    assert "absolute_path" not in _codes(
+        audit_repository(tmp_path, tracked=("docs/links.md",))
+    )

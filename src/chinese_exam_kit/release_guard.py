@@ -798,20 +798,27 @@ def _mask_safe_path_contexts(text: str) -> tuple[str, bool]:
 def _markdown_destination_disposition(
     destination: str,
 ) -> _MarkdownDestinationDisposition:
+    safe_to_mask = True
+    angle_destination = False
     if destination.startswith("<") or destination.endswith(">"):
         if not (destination.startswith("<") and destination.endswith(">")):
             return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
         destination = destination[1:-1]
+        angle_destination = True
         if not destination or "<" in destination or ">" in destination:
             return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
         if any(character.isspace() for character in destination):
-            if _looks_like_host_path(destination):
-                return _MarkdownDestinationDisposition.UNSAFE_PATH
-            return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
+            safe_to_mask = False
 
     if _valid_http_url(destination):
-        return _MarkdownDestinationDisposition.SAFE_TO_MASK
+        if not _safe_http_url_destination(destination):
+            return _MarkdownDestinationDisposition.UNSAFE_PATH
+        if safe_to_mask:
+            return _MarkdownDestinationDisposition.SAFE_TO_MASK
+        return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
 
+    if angle_destination and _has_basic_destination_danger(destination):
+        return _MarkdownDestinationDisposition.UNSAFE_PATH
     if "%" in destination:
         decoded = _bounded_destination_decode(destination)
         if decoded is None:
@@ -824,7 +831,9 @@ def _markdown_destination_disposition(
     if not decoded.startswith("/"):
         return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
     if _safe_public_root_destination(decoded):
-        return _MarkdownDestinationDisposition.SAFE_TO_MASK
+        if safe_to_mask:
+            return _MarkdownDestinationDisposition.SAFE_TO_MASK
+        return _MarkdownDestinationDisposition.ORDINARY_UNMASKED
     return _MarkdownDestinationDisposition.UNSAFE_PATH
 
 
@@ -905,6 +914,51 @@ def _valid_http_url(value: str) -> bool:
     )
 
 
+def _safe_http_url_destination(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return all(
+        _bounded_url_component_decode(component) is not None
+        for component in (parsed.path, parsed.query, parsed.fragment)
+    )
+
+
+def _bounded_url_component_decode(
+    value: str, *, maximum_rounds: int = 4
+) -> str | None:
+    current = value
+    for _ in range(maximum_rounds):
+        if not _safe_url_component_state(current):
+            return None
+        try:
+            decoded = unquote(current, encoding="utf-8", errors="strict")
+        except UnicodeError:
+            return None
+        if decoded == current:
+            return current
+        current = decoded
+
+    if not _safe_url_component_state(current):
+        return None
+    try:
+        next_value = unquote(current, encoding="utf-8", errors="strict")
+    except UnicodeError:
+        return None
+    if next_value != current:
+        return None
+    return current
+
+
+def _safe_url_component_state(value: str) -> bool:
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return False
+    if _has_basic_destination_danger(value):
+        return False
+    return not re.search(r"(?:^|/)\.\.(?:/|$)", value)
+
+
 def _looks_like_host_path(value: str) -> bool:
     if re.search(r"(?i)(?<![A-Za-z])file:[\\/]{1,3}", value):
         return True
@@ -915,19 +969,21 @@ def _looks_like_host_path(value: str) -> bool:
     return False
 
 
-def _safe_destination_decode_state(value: str) -> bool:
-    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
-        return False
-    if "\\" in value or value.startswith("//"):
-        return False
-    if unicodedata.normalize("NFC", value) != value:
-        return False
-    if any(
+def _has_basic_destination_danger(value: str) -> bool:
+    if "\\" in value or unicodedata.normalize("NFC", value) != value:
+        return True
+    return any(
         ord(character) < 32
         or ord(character) == 127
         or unicodedata.category(character) == "Cf"
         for character in value
-    ):
+    )
+
+
+def _safe_destination_decode_state(value: str) -> bool:
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        return False
+    if value.startswith("//") or _has_basic_destination_danger(value):
         return False
     if re.search(r"(?i)(?<![A-Za-z])file:[\\/]{1,3}", value):
         return False
