@@ -130,15 +130,15 @@ class PipelineRunner:
             return summarize(task)
 
     def _intake(self, task: PipelineTask) -> PipelineTask:
-        records = tuple(
+        fingerprint_records = tuple(
             record for record in task.materials if record.material_type != "answer_candidate"
         )
-        fingerprint = _materials_fingerprint(records)
+        fingerprint = _materials_fingerprint(fingerprint_records)
 
         def validate_archives() -> bool:
-            for record in records:
-                archived = task.workspace / record.archived_path
-                if archived.is_symlink() or not archived.is_file():
+            for record in task.materials:
+                archived = _safe_existing_file(task.workspace, record.archived_path)
+                if archived is None:
                     raise ValueError("archived input is missing or unsafe")
                 if sha256_file(archived) != record.sha256:
                     raise ValueError("archived input digest mismatch")
@@ -203,8 +203,10 @@ class PipelineRunner:
         records = tuple(record for record in task.materials if record.material_type in MEDIA_TYPES)
         fingerprint = _materials_fingerprint(records)
         current = task.stages["media"]
-        receipt_path = task.workspace / "media" / "receipt.json"
-        index_path = task.workspace / "media" / "index.json"
+        media_dir = task.workspace / "media"
+        _prepare_managed_directory(media_dir, managed_root=task.workspace, label="media")
+        receipt_path = media_dir / "receipt.json"
+        index_path = media_dir / "index.json"
         receipt = _valid_media_receipt(receipt_path, index_path, fingerprint)
         if (
             receipt is not None
@@ -222,7 +224,7 @@ class PipelineRunner:
         try:
             if records:
                 paths = tuple(task.workspace / record.archived_path for record in records)
-                result = self.media_provider.process(paths, task.workspace / "media")
+                result = self.media_provider.process(paths, media_dir)
             else:
                 result = MediaLearningResult.completed()
             write_media_index(result, index_path)
@@ -1000,7 +1002,11 @@ def _valid_verification(
         return False
     try:
         payload = json.loads(verification.read_text(encoding="utf-8"))
+        manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+        delivery = DeliveryManifest.from_dict(manifest_payload)
     except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    except (TypeError, ValueError):
         return False
     if (
         not isinstance(payload, dict)
@@ -1013,6 +1019,10 @@ def _valid_verification(
             "outputs",
         }
         or payload.get("schema_version") != 1
+        or payload.get("content_validation") != "passed"
+        or payload.get("visual_review") != "evidence_ready"
+        or delivery.visual_status != "evidence_ready"
+        or payload.get("visual_review") != delivery.visual_status
         or payload.get("manifest_sha256") != manifest_fingerprint
     ):
         return False
@@ -1030,14 +1040,72 @@ def _safe_existing_file(root: Path, relative: str) -> Path | None:
     cursor = root_path
     for part in PurePosixPath(safe).parts:
         cursor = cursor / part
-        if cursor.is_symlink():
+        try:
+            metadata = cursor.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(metadata.st_mode):
             return None
     try:
         resolved = cursor.resolve(strict=True)
         resolved.relative_to(root_path)
     except (OSError, RuntimeError, ValueError):
         return None
-    return resolved if resolved.is_file() else None
+    try:
+        return resolved if stat.S_ISREG(resolved.stat().st_mode) else None
+    except OSError:
+        return None
+
+
+def _prepare_managed_directory(
+    directory: Path, *, managed_root: Path, label: str
+) -> Path:
+    """Create a real managed directory without ever following a replacement link."""
+
+    boundary = Path(managed_root)
+    target = Path(directory)
+    try:
+        relative = target.absolute().relative_to(boundary.absolute())
+    except ValueError:
+        raise ValueError(f"{label} directory escapes its managed root") from None
+    if not relative.parts:
+        raise ValueError(f"{label} directory must be below its managed root")
+    try:
+        boundary_metadata = boundary.lstat()
+    except OSError:
+        raise ValueError(f"{label} managed root is unsafe") from None
+    if stat.S_ISLNK(boundary_metadata.st_mode) or not stat.S_ISDIR(
+        boundary_metadata.st_mode
+    ):
+        raise ValueError(f"{label} managed root is unsafe")
+    try:
+        resolved_boundary = boundary.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError(f"{label} managed root is unsafe") from None
+
+    cursor = boundary
+    for index, part in enumerate(relative.parts):
+        cursor = cursor / part
+        is_target = index == len(relative.parts) - 1
+        try:
+            metadata = cursor.lstat()
+        except FileNotFoundError:
+            cursor.mkdir()
+            continue
+        except OSError:
+            raise ValueError(f"{label} directory is unsafe") from None
+        if stat.S_ISLNK(metadata.st_mode):
+            if not is_target:
+                raise ValueError(f"{label} directory cannot contain a symlink")
+            cursor.unlink()
+            cursor.mkdir()
+        elif not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"{label} directory is unsafe")
+    try:
+        cursor.resolve(strict=True).relative_to(resolved_boundary)
+    except (OSError, RuntimeError, ValueError):
+        raise ValueError(f"{label} directory escapes its managed root") from None
+    return cursor
 
 
 def _reject_symlinks_below(

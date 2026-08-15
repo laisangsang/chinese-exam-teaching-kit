@@ -230,6 +230,27 @@ def test_missing_media_index_forces_only_media_rebuild(tmp_path):
     assert load_task(task_path).stages["extract"].events == extract_events
 
 
+def test_media_directory_symlink_is_replaced_without_touching_external_target(
+    tmp_path,
+):
+    task_path = _create_task(tmp_path, media=True)
+    runner = PipelineRunner(tmp_path, media_provider=UnavailableMediaProvider())
+    runner.resume(task_path)
+    media = task_path.parent / "media"
+    outside = tmp_path / "outside-media"
+    media.rename(outside)
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    media.symlink_to(outside, target_is_directory=True)
+
+    summary = runner.resume(task_path)
+
+    assert summary.stage("media").status == "degraded"
+    assert media.is_dir() and not media.is_symlink()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert (media / "index.json").is_file()
+
+
 def test_missing_extract_artifact_is_rebuilt_without_repeating_intake(tmp_path):
     task_path = _create_task(tmp_path)
     runner = PipelineRunner(tmp_path)
@@ -306,6 +327,61 @@ def test_missing_archive_never_remains_falsely_completed(tmp_path):
     with pytest.raises(ValueError, match="archived input"):
         runner.resume(task_path)
 
+    assert load_task(task_path).stages["intake"].status == "failed"
+
+
+@pytest.mark.parametrize("damage", ("missing", "tampered"))
+def test_answer_archive_integrity_is_checked_without_using_original_source(
+    tmp_path, damage
+):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. A。\n", encoding="utf-8")
+    attachment = attach_reference_answers(task_path, [answer])
+    task = load_task(task_path)
+    answer_record = next(
+        record for record in task.materials if record.sha256 in attachment.added_sha256
+    )
+    archived = task.workspace / answer_record.archived_path
+    if damage == "missing":
+        archived.unlink()
+    else:
+        archived.write_text("篡改后的答案", encoding="utf-8")
+    original_bytes = answer.read_bytes()
+
+    with pytest.raises(ValueError, match="archived input") as captured:
+        runner.resume(task_path)
+
+    failed = load_task(task_path)
+    assert failed.stages["intake"].status == "failed"
+    assert failed.stages["extract"].status != "completed"
+    assert answer.read_bytes() == original_bytes
+    assert str(tmp_path) not in str(captured.value)
+
+
+def test_inputs_directory_symlink_is_never_followed_to_validate_archives(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    task = load_task(task_path)
+    inputs = task.workspace / "inputs"
+    outside = tmp_path / "outside-inputs"
+    inputs.rename(outside)
+    inputs.symlink_to(outside, target_is_directory=True)
+    before = {
+        path.name: path.read_bytes() for path in outside.iterdir() if path.is_file()
+    }
+
+    with pytest.raises(ValueError, match="archived input"):
+        runner.resume(task_path)
+
+    after = {
+        path.name: path.read_bytes() for path in outside.iterdir() if path.is_file()
+    }
+    assert after == before
+    assert inputs.is_symlink()
     assert load_task(task_path).stages["intake"].status == "failed"
 
 
@@ -434,6 +510,48 @@ def test_missing_docx_or_tampered_delivery_receipt_forces_delivery_rebuild(tmp_p
     runner.resume(task_path)
 
     assert output.stat().st_mtime_ns != mtime
+
+
+def test_tampered_verification_content_status_is_rebuilt_to_passed(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    assert runner.resume(task_path).status == "completed"
+    verification = task_path.parent / "output" / "verification.json"
+    payload = json.loads(verification.read_text(encoding="utf-8"))
+    payload["content_validation"] = "failed"
+    verification.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert runner.resume(task_path).status == "completed"
+
+    repaired = json.loads(verification.read_text(encoding="utf-8"))
+    assert repaired["content_validation"] == "passed"
+    assert repaired["visual_review"] == "evidence_ready"
+
+
+@pytest.mark.parametrize("tampered", ("passed", "failed", "unknown"))
+def test_tampered_verification_visual_status_never_remains_completed(
+    tmp_path, tampered
+):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    assert runner.resume(task_path).status == "completed"
+    verification = task_path.parent / "output" / "verification.json"
+    payload = json.loads(verification.read_text(encoding="utf-8"))
+    payload["visual_review"] = tampered
+    verification.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert runner.resume(task_path).status == "completed"
+
+    repaired = json.loads(verification.read_text(encoding="utf-8"))
+    manifest = json.loads(
+        (task_path.parent / "output" / "delivery.json").read_text(encoding="utf-8")
+    )
+    assert repaired["visual_review"] == "evidence_ready"
+    assert manifest["visual_status"] == repaired["visual_review"]
 
 
 def test_answer_attachment_recovers_without_duplicate_ledger_after_state_write_crash(

@@ -197,12 +197,16 @@ def test_media_receipt_status_must_match_persisted_stage(tmp_path):
             {
                 "schema_version": 1,
                 "fingerprint": "f" * 64,
-                "status": "completed",
+                "status": "degraded",
                 "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
-                "provider_path": "/Users/Alice Smith/tool",
             }
         ),
         encoding="utf-8",
     )
+
+    assert _valid_media_receipt(receipt, index, "f" * 64) == {"status": "degraded"}
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["status"] = "completed"
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
 
     assert _valid_media_receipt(receipt, index, "f" * 64) is None
