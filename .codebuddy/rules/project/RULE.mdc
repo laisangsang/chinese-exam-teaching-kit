@@ -1,0 +1,9 @@
+---
+alwaysApply: true
+---
+
+# 语文讲评项目路由
+
+先读取仓库根目录的 `AGENTS.md`。流程只遵循 [docs/自动流水线说明.md](../../../docs/自动流水线说明.md)，学科分析只遵循 [docs/六板块分析规范.md](../../../docs/六板块分析规范.md)。真实材料只在 `.local/`；正式 Markdown 在任务 `content/`；公共 `knowledge/` 不得保存真实材料。
+
+完成校验、构建和人工逐页验收后再交付；不得上传材料、调用外部 API、自动提交或推送。兼容性边界见 [agent-guides/WorkBuddy-CodeBuddy.md](../../../agent-guides/WorkBuddy-CodeBuddy.md)。
