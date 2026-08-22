@@ -94,13 +94,16 @@ def test_release_guard_blocks_large_binary_media_and_lfs_pointers(tmp_path):
 
 
 def test_release_guard_blocks_crlf_lfs_pointers(tmp_path):
-    _write(
-        tmp_path,
-        "docs/asset.txt",
-        "version https://git-lfs.github.com/spec/v1\r\n"
-        "oid sha256:" + "a" * 64 + "\r\nsize 12\r\n",
+    lfs = tmp_path / "docs" / "asset.txt"
+    lfs.parent.mkdir(parents=True)
+    lfs.write_bytes(
+        (
+            "version https://git-lfs.github.com/spec/v1\r\n"
+            "oid sha256:" + "a" * 64 + "\r\nsize 12\r\n"
+        ).encode("utf-8")
     )
 
+    assert b"\r\r\n" not in lfs.read_bytes()
     assert "lfs_pointer" in _codes(
         audit_repository(tmp_path, tracked=("docs/asset.txt",))
     )
