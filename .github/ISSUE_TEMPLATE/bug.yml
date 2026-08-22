@@ -1,0 +1,15 @@
+{
+  "name": "错误报告",
+  "description": "提交可公开复现的程序错误，不要上传真实教学材料。",
+  "title": "[Bug]: ",
+  "labels": ["bug"],
+  "body": [
+    {"type": "markdown", "attributes": {"value": "仅提交脱敏环境信息和原创最小复现。请勿上传真实试卷、答案、学生信息、课程音视频、内部文件或密钥。"}},
+    {"type": "input", "id": "os", "attributes": {"label": "操作系统", "description": "例如 macOS、Windows 或 Linux 及版本。", "placeholder": "macOS 15"}, "validations": {"required": true}},
+    {"type": "input", "id": "python", "attributes": {"label": "Python 版本", "description": "运行 python --version 的脱敏结果。", "placeholder": "3.12.0"}, "validations": {"required": true}},
+    {"type": "input", "id": "agent", "attributes": {"label": "智能体", "description": "未使用智能体时填写“未使用”。", "placeholder": "Codex / Claude Code / 未使用"}, "validations": {"required": true}},
+    {"type": "textarea", "id": "doctor", "attributes": {"label": "脱敏后的 doctor 报告", "description": "运行 cekit doctor --report 后，删除用户名、私有路径和其他标识再粘贴。"}, "validations": {"required": true}},
+    {"type": "textarea", "id": "reproduction", "attributes": {"label": "原创最小复现", "description": "提供不含真实材料的最小命令、原创输入和实际/预期结果。"}, "validations": {"required": true}},
+    {"type": "checkboxes", "id": "privacy", "attributes": {"label": "隐私与授权确认", "options": [{"label": "我确认没有上传真实试卷、学生信息、课程音视频、密钥或内部文件，且复现材料为原创或可公开再分发。", "required": true}]}}
+  ]
+}

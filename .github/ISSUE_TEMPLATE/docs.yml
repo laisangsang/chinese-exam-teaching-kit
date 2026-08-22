@@ -1,0 +1,11 @@
+{
+  "name": "文档改进",
+  "description": "报告文档问题或提出改进建议。",
+  "title": "[Docs]: ",
+  "labels": ["documentation"],
+  "body": [
+    {"type": "input", "id": "location", "attributes": {"label": "文档位置", "description": "填写文件路径或章节名称。", "placeholder": "docs/快速开始.md"}, "validations": {"required": true}},
+    {"type": "textarea", "id": "change", "attributes": {"label": "建议修改", "description": "说明问题、读者影响和可公开的修改建议。"}, "validations": {"required": true}},
+    {"type": "checkboxes", "id": "privacy", "attributes": {"label": "隐私与授权确认", "options": [{"label": "我确认没有上传真实试卷、学生信息、课程音视频、密钥或内部文件，且引用或示例为原创或可公开再分发。", "required": true}]}}
+  ]
+}
