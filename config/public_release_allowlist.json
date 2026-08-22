@@ -1,6 +1,7 @@
 {
   "allowed_example_directory": "examples/original-mini-exam",
   "allowed_root_files": [
+    ".gitattributes",
     ".gitignore",
     "AGENTS.md",
     "CHANGELOG.md",

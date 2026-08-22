@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -90,6 +91,58 @@ def test_release_guard_blocks_large_binary_media_and_lfs_pointers(tmp_path):
     assert "lfs_pointer" in _codes(
         audit_repository(tmp_path, tracked=("docs/asset.txt",))
     )
+
+
+def test_release_guard_blocks_crlf_lfs_pointers(tmp_path):
+    _write(
+        tmp_path,
+        "docs/asset.txt",
+        "version https://git-lfs.github.com/spec/v1\r\n"
+        "oid sha256:" + "a" * 64 + "\r\nsize 12\r\n",
+    )
+
+    assert "lfs_pointer" in _codes(
+        audit_repository(tmp_path, tracked=("docs/asset.txt",))
+    )
+
+
+def test_gitattributes_is_a_portable_allowed_root_file(tmp_path):
+    _write(tmp_path, ".gitattributes", "* text=auto eol=lf\n")
+
+    issues = audit_repository(tmp_path, tracked=(".gitattributes",))
+
+    assert not [issue for issue in issues if issue.level == "error"]
+
+
+def test_repository_attributes_keep_text_checkouts_lf(tmp_path):
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "test" + "@" + "example.com"),
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.name", "Test"), cwd=repository, check=True
+    )
+    attributes = Path(".gitattributes")
+    if attributes.is_file():
+        shutil.copyfile(attributes, repository / ".gitattributes")
+    (repository / "note.md").write_bytes(b"one\ntwo\n")
+    subprocess.run(("git", "add", "."), cwd=repository, check=True)
+    subprocess.run(("git", "commit", "-qm", "base"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "config", "core.autocrlf", "true"), cwd=repository, check=True
+    )
+    subprocess.run(("git", "rm", "-q", "note.md"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "checkout", "-q", "HEAD", "--", "note.md"),
+        cwd=repository,
+        check=True,
+    )
+
+    assert (repository / "note.md").read_bytes() == b"one\ntwo\n"
 
 
 @pytest.mark.parametrize(
@@ -280,16 +333,25 @@ def test_issue_order_and_messages_are_deterministic_and_redacted(tmp_path):
     assert _secret() not in rendered
 
 
-def test_default_git_inventory_handles_unicode_and_reports_control_names(tmp_path):
+def test_default_git_inventory_handles_unicode(tmp_path):
     subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
     _write(tmp_path, "docs/原创.md", "safe")
+    subprocess.run(("git", "add", "--", "docs"), cwd=tmp_path, check=True)
+
+    issues = audit_repository(tmp_path)
+
+    assert not any(issue.path == "docs/原创.md" for issue in issues)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows forbids newline characters in filenames")
+def test_default_git_inventory_reports_control_names(tmp_path):
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
     _write(tmp_path, "docs/line\nbreak.md", "safe")
     subprocess.run(("git", "add", "--", "docs"), cwd=tmp_path, check=True)
 
     issues = audit_repository(tmp_path)
 
     assert "invalid_path" in _codes(issues)
-    assert not any(issue.path == "docs/原创.md" for issue in issues)
 
 
 def test_git_inventory_uses_nul_delimited_primary_paths_and_index_modes(monkeypatch):

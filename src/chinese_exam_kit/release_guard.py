@@ -44,6 +44,7 @@ _DEFAULT_POLICY: dict[str, object] = {
     ],
     "allowed_example_directory": "examples/original-mini-exam",
     "allowed_root_files": [
+        ".gitattributes",
         ".gitignore",
         "AGENTS.md",
         "CHANGELOG.md",
@@ -468,7 +469,7 @@ def _audit_tracked_file(
     except UnicodeError:
         issues.append(_issue("binary_file", relative))
         return issues
-    if text.startswith(_LFS_HEADER + "\n"):
+    if text.startswith((_LFS_HEADER + "\n", _LFS_HEADER + "\r\n")):
         issues.append(_issue("lfs_pointer", relative))
         return issues
     issues.extend(
@@ -637,7 +638,12 @@ def _safe_relative(value: str) -> str | None:
         for number in (*range(1, 10), "¹", "²", "³")
     }
     for part in candidate.parts:
-        allowed_dot_components = {".codebuddy", ".github", ".gitignore"}
+        allowed_dot_components = {
+            ".codebuddy",
+            ".gitattributes",
+            ".github",
+            ".gitignore",
+        }
         if (
             any(character in invalid_windows_characters for character in part)
             or (part != part.strip(" .") and part not in allowed_dot_components)
