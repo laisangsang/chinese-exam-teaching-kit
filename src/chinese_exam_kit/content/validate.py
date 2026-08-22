@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 
-DEFAULT_CONTRACT_PATH = Path(__file__).resolve().parents[3] / "config" / "content_contract.json"
+DEFAULT_CONTRACT_RESOURCE = "content_contract.json"
 HEADING_RE = re.compile(r"(?m)^(?P<marks>#{1,6})[ \t]+(?P<title>[^\n]+?)\s*$")
 TEMPLATE_VARIABLE_RE = re.compile(r"\$\{[^{}\n]+\}")
 QUESTION_NUMBER_RE = re.compile(r"第?\s*\d+\s*题")
@@ -98,8 +99,11 @@ def format_issues_text(issues: Iterable[ValidationIssue]) -> str:
 
 def _load_contract(contract: Mapping[str, Any] | Path | None) -> Mapping[str, Any]:
     if contract is None:
-        path = DEFAULT_CONTRACT_PATH
-        payload: Any = json.loads(path.read_text(encoding="utf-8"))
+        payload: Any = json.loads(
+            files("chinese_exam_kit.resources")
+            .joinpath(DEFAULT_CONTRACT_RESOURCE)
+            .read_text(encoding="utf-8")
+        )
     elif isinstance(contract, Mapping):
         payload = contract
     else:

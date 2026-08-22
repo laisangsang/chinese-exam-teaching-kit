@@ -1,10 +1,12 @@
 import json
 import os
 import re
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
 
+import chinese_exam_kit.content.validate as validate_module
 from chinese_exam_kit.content.validate import (
     ValidationIssue,
     format_issues_json,
@@ -13,6 +15,20 @@ from chinese_exam_kit.content.validate import (
     validate_file,
 )
 from tests._host_samples import posix_path, unc_path, windows_path
+
+
+def test_default_content_contract_is_packaged_resource():
+    resource = files("chinese_exam_kit.resources").joinpath("content_contract.json")
+
+    assert resource.is_file()
+    assert json.loads(resource.read_text(encoding="utf-8"))["schema_version"] == 1
+
+
+def test_default_validation_loads_packaged_contract():
+    contract = validate_module._load_contract(None)
+
+    assert contract["schema_version"] == 1
+    assert contract["module_files"]
 
 
 def _write(path: Path, text: str) -> Path:
