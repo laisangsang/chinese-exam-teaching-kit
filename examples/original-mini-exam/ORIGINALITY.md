@@ -28,8 +28,8 @@
 - `4f060a68dc777971598f2b74483095d521babe77a93c79d8f12bcf4768bc8db1`  `content/01_阅读一_信息类文本详案.md`
 - `1c0aa9a5f7bce27450df3bd437f0db5b788e2979e057e0a3e17e6649a22ec65e`  `content/02_阅读二_文学类文本详案.md`
 - `dffdfb159fa9d258e4af2a56f7d5176dfae5c27217225309927df2b1bbdb84df`  `content/03_阅读三_文言文详案.md`
-- `87ea0ff4149bc04989be925059e9097e634e73c9a63d686f9b0060c05d5d6d3f`  `content/04_阅读四_古诗文详案.md`
-- `8396391a09339476fb1862134d91b251dacee2e84e4a8049aa8394eb8e95fef9`  `content/05_语言文字运用详案.md`
+- `d47ea4ce0390286c85ca71025d4a2e85b485129ce16ad46956d9073dc6a3eb64`  `content/04_阅读四_古诗文详案.md`
+- `dc108ea3ab548b0bb7ee35f41107472d18793e06d9ceda282d3e24a7bd414ce7`  `content/05_语言文字运用详案.md`
 - `3ac5eecc8a66b1072b15eec0282937f5c387af3d0bfe18ca2485bdac49887c04`  `content/06_作文审题与写作指导详案.md`
 - `d9c7b2794f1af91bbb5fc5712b73a77c28dbd2bd68613a4c6dd0480cec07d345`  `knowledge/cards/methods/MT-0001.md`
 - `ac421b1f2a5d880c57a484c1720c03a3bb49bc60eb843c8745db94e554a623ae`  `knowledge/cards/overviews/OV-0001.md`
