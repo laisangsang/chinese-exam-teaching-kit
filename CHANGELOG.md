@@ -1,5 +1,13 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.1.0 - Release candidate
 
-- Initialize the public package skeleton.
+- 提供本地优先的试卷材料归档、提取、分析工作单、内容校验与 Word 构建流程。
+- 提供原创微型示范卷及 7 份可独立构建的教师讲评 Markdown 源稿。
+- 提供环境诊断、公开发行表面审计和不含原始材料的发布前核查能力。
+
+已知限制：
+
+- 自动流程在需要教师撰写 Markdown 详案的分析工作单处暂停；不会生成学科分析内容。
+- OCR、视频、转写和 LibreOffice 等增强能力取决于本机环境，缺失时会在诊断中说明。
+- 本候选版本仅完成本地发行准备；GitHub 尚未公开，尚未创建正式 Release。
