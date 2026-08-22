@@ -68,6 +68,18 @@ def test_issue_template_configuration_disables_unstructured_blank_issues():
     assert config["blank_issues_enabled"] is False
 
 
+def test_security_policy_uses_only_the_github_private_vulnerability_report_path():
+    text = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    assert "GitHub 仓库的 **Security** 页面" in text
+    assert "私密漏洞报告功能" in text
+    assert "私密报告路径" in text
+    assert "http" not in text
+    assert not any(
+        forbidden in text
+        for forbidden in ("邮箱", "私密流程", "私密渠道", "备用私密", "其他私密")
+    )
+
+
 def test_ci_workflow_runs_the_exact_supported_matrix_and_project_test_command():
     workflow = _load_yaml(WORKFLOWS / "ci.yml")
     assert {"push", "pull_request"} <= set(workflow["on"])
