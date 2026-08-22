@@ -10,7 +10,23 @@
 - **智能体入口**：把[通用智能体指南](agent-guides/通用智能体指南.md)交给能读写本地文件并运行命令的智能体，再按[兼容性说明](docs/兼容性.md)选择 Codex、Claude Code 或 WorkBuddy/CodeBuddy 入口。
 - **开发者入口**：阅读[架构与开发](docs/架构与开发.md)、运行测试，并从本地源码安装可编辑版本。
 
-## 五分钟体验原创示例
+## 五分钟原创示例
+
+要求 Python 3.11 或更高版本。以源码 editable install 运行原创微型示范卷，先做环境检查、内容校验和 Word 构建；完整命令与人工逐页验收见[原创示例教程](docs/原创示例教程.md)和下方的详细流程。
+
+## 能力边界
+
+材料默认本地离线处理；项目不上传材料、不调用外部大模型、不下载模型，也不自动 Git 提交或发布。扫描 PDF OCR、媒体转写和页面渲染依赖本机能力，自动构建不代替人工逐页验收；详见[完整安装说明](docs/完整安装说明.md)和[Word 生成与版式验收](docs/Word生成与版式验收.md)。
+
+## 支持矩阵
+
+核心 CLI、文字层提取和 Word 构建支持 macOS、Windows、Linux；macOS 可选 Apple Vision OCR，其他系统由本地 provider 注入。各智能体入口及版本核验边界见[兼容性说明](docs/兼容性.md)。
+
+## 项目状态与贡献
+
+当前为 `0.1.0` 本地预览，正在准备首次公开发行：尚未发布 PyPI，未声明已验证远端 CI。公共知识库是空框架，不代表历史知识完备。贡献前阅读[架构与开发](docs/架构与开发.md)，只提交原创、可追溯且不含私有材料的内容。
+
+## 完整安装与详细流程
 
 要求 Python 3.11 或更高版本。当前公开发行准备阶段以本地源码安装为准；仓库正式发布后可从授权目标地址 `https://github.com/laisangsang/chinese-exam-teaching-kit.git` 克隆。
 
@@ -67,7 +83,7 @@ cekit build --content .local/tasks/青禾原创练习/content --output .local/ta
 
 完整的暂停、恢复和后补答案边界见[自动流水线说明](docs/自动流水线说明.md)。
 
-## 能力边界
+## 详细能力边界
 
 - 支持 Markdown、纯文本、DOCX 和 PDF 的本地文字提取；扫描型 PDF 需要本地 OCR 条件。
 - macOS 可选用随包提供的 Apple Vision OCR；其他系统需要注入本地 `OcrProvider`。项目不会自动下载模型。
@@ -76,7 +92,7 @@ cekit build --content .local/tasks/青禾原创练习/content --output .local/ta
 - 分析写作由教师或智能体完成，系统提供工作单、内容合同、确定性校验和 Word 构建，不保证自动生成学科结论。
 - `evidence_ready` 不等于人工视觉验收 `passed`；当前 CLI 不提供伪造人工签名的捷径。
 
-## 支持矩阵
+## 详细支持矩阵
 
 | 能力 | macOS | Windows | Linux |
 | --- | --- | --- | --- |
@@ -88,7 +104,7 @@ cekit build --content .local/tasks/青禾原创练习/content --output .local/ta
 
 环境事实以 `cekit doctor` 的本机报告为准，完整安装选项见[完整安装说明](docs/完整安装说明.md)，智能体支持等级见[兼容性](docs/兼容性.md)。
 
-## 项目状态与贡献
+## 详细项目状态与贡献
 
 当前版本为 `0.1.0` 本地预览，正在准备首次公开发行。公共知识库是可用的空框架，不代表已有历史知识内容；参见[知识库说明](docs/知识库说明.md)。常见问题见[FAQ](docs/常见问题.md)。
 

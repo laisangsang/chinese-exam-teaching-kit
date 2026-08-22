@@ -105,6 +105,24 @@ def test_readme_has_three_audience_entrances_and_core_five_minute_commands():
         assert promise_boundary in text
 
 
+def test_readme_first_screen_has_required_navigation_in_brief_order():
+    text = README.read_text(encoding="utf-8")
+    first_detailed_install = text.index("## 完整安装与详细流程")
+    required_order = (
+        "# Chinese Exam Teaching Kit",
+        "版权与隐私先行",
+        "## 三类入口",
+        "## 五分钟原创示例",
+        "## 能力边界",
+        "## 支持矩阵",
+        "## 项目状态与贡献",
+    )
+    positions = [text.index(item) for item in required_order]
+
+    assert positions == sorted(positions)
+    assert all(position < first_detailed_install for position in positions)
+
+
 def test_every_documented_cekit_invocation_matches_the_real_parser():
     commands = [
         command
