@@ -24,11 +24,11 @@
 
 ## 项目状态与贡献
 
-当前为 `0.1.0` 本地预览，正在准备首次公开发行：尚未发布 PyPI，未声明已验证远端 CI。公共知识库是空框架，不代表历史知识完备。贡献前阅读[架构与开发](docs/架构与开发.md)，只提交原创、可追溯且不含私有材料的内容。
+公开仓库已发布不可变的 `v0.1.0` Release；当前 `main` 继续承载发布后加固，不改写旧 tag 或资产。项目尚未发布 PyPI，请从公开 GitHub 源码安装。公共知识库是空框架，不代表历史知识完备。
 
 ## 完整安装与详细流程
 
-要求 Python 3.11 或更高版本。当前公开发行准备阶段以本地源码安装为准；仓库正式发布后可从授权目标地址 `https://github.com/laisangsang/chinese-exam-teaching-kit.git` 克隆。
+要求 Python 3.11 或更高版本。从公开仓库 `https://github.com/laisangsang/chinese-exam-teaching-kit.git` 克隆，再从源码安装；尚不要将 PyPI 当作发布渠道。
 
 ```bash
 python -m venv .venv
@@ -60,15 +60,15 @@ cekit build --content examples/original-mini-exam/content --output .local/demo-o
 
 ## 处理自己的材料
 
-下面的示例假定你已将有权使用的文件放在未跟踪的 `.local/inbox/`。`--input` 可重复，用于同一任务的试卷、答案等文件。
+下面的示例假定你已将有权使用的文件放在未跟踪的 `.local/inbox/`。对 Markdown、TXT、DOCX 和 PDF，优先用可重复的 `--exam` 与 `--answer` 显式绑定角色；`--input` 仍用于需要自动分类的材料。
 
 ```bash
-cekit init --name 青禾原创练习 --input .local/inbox/青禾原创练习.md --input .local/inbox/青禾原创答案.md
+cekit init --name 青禾原创练习 --exam .local/inbox/青禾原创练习.md --answer .local/inbox/青禾原创答案.md
 cekit run --task .local/tasks/青禾原创练习/task.json
 cekit status --task .local/tasks/青禾原创练习/task.json --json
 ```
 
-第一次 `run` 通常会暂停在分析阶段。请读取 `.local/tasks/青禾原创练习/work_orders/analysis.md`，按[六板块分析规范](docs/六板块分析规范.md)编写 `content/` 中的 Markdown，然后：
+第一次 `run` 会先在 `knowledge_pre` 等待逐题 `question-manifest.json`；满足题号、来源 SHA-256 和提取索引的精确覆盖后，才会生成真实检索收据并进入分析工作单。分析后还须在 `post-review.json` 逐题裁决冲突与候选知识；缺证据时阶段保持 `waiting`。
 
 ```bash
 cekit validate --task .local/tasks/青禾原创练习/task.json
@@ -106,7 +106,7 @@ cekit build --content .local/tasks/青禾原创练习/content --output .local/ta
 
 ## 详细项目状态与贡献
 
-当前版本为 `0.1.0` 本地预览，正在准备首次公开发行。公共知识库是可用的空框架，不代表已有历史知识内容；参见[知识库说明](docs/知识库说明.md)。常见问题见[FAQ](docs/常见问题.md)。
+已发布 `v0.1.0`；当前 `main` 为发布后加固状态。公共知识库是可用的空框架，不代表已有历史知识内容；参见[知识库说明](docs/知识库说明.md)。常见问题见[FAQ](docs/常见问题.md)。
 
 欢迎在确保内容原创、来源可追溯、无私有材料的前提下参与。开发前请阅读[架构与开发](docs/架构与开发.md)，提交前运行：
 

@@ -6,6 +6,7 @@ import json
 import re
 import tomllib
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping
 
@@ -75,8 +76,16 @@ class IndexBuildFailure:
     index: None = None
 
 
-def load_contract(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+def load_contract(path: Path | None = None) -> dict[str, Any]:
+    """Load an explicit knowledge contract or the packaged public default."""
+    text = (
+        Path(path).read_text(encoding="utf-8")
+        if path is not None
+        else files("chinese_exam_kit.resources")
+        .joinpath("knowledge_contract.json")
+        .read_text(encoding="utf-8")
+    )
+    payload = json.loads(text)
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ValueError("knowledge contract schema_version must be 1")
     return payload

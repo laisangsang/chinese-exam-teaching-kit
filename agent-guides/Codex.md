@@ -1,8 +1,8 @@
 # Codex 本地协作指南
 
-Codex 的官方材料未确认会自动读取本项目的 `AGENTS.md`。因此每次新任务都应明确要求：“先读取仓库根目录的 `AGENTS.md`，再开始处理。”随后把本项目路径作为工作目录，并使用[通用智能体指南](通用智能体指南.md)的可复制提示词。
+Codex 官方文档说明，它会在开始工作前发现并读取 `AGENTS.md`：先加载全局范围，再从项目根到当前工作目录按层级叠加，越靠近当前目录的文件优先级越高。见 [Codex 官方 AGENTS.md 说明](https://developers.openai.com/codex/agent-configuration/agents-md)。仍建议在新任务开头明确要求复述已读取的项目规则，这有助于发现工作目录错误，也为不支持自动发现的其他智能体保留可执行引导。
 
-`AGENTS.md` 是薄入口：它只路由到[自动流水线说明](../docs/自动流水线说明.md)、[六板块分析规范](../docs/六板块分析规范.md)和[知识库说明](../docs/知识库说明.md)，不另设学科规则。Codex 产品资料入口见[OpenAI 开发者文档](https://developers.openai.com/)；该链接不构成自动加载 `AGENTS.md` 的承诺。
+`AGENTS.md` 是薄入口：它只路由到[自动流水线说明](../docs/自动流水线说明.md)、[六板块分析规范](../docs/六板块分析规范.md)和[知识库说明](../docs/知识库说明.md)，不另设学科规则。
 
 ## 建议的任务开场
 
@@ -13,7 +13,7 @@ Codex 的官方材料未确认会自动读取本项目的 `AGENTS.md`。因此�
 新任务创建与恢复命令：
 
 ```bash
-cekit init --name 原创练习 --input .local/inbox/原创练习.md
+cekit init --name 原创练习 --exam .local/inbox/原创练习.md --answer .local/inbox/原创答案.md
 cekit run --task .local/tasks/原创练习/task.json
 ```
 

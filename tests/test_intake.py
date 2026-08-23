@@ -296,3 +296,54 @@ def test_archive_lock_windows_branch_is_injectable_and_always_unlocks(tmp_path):
         windows_api.LK_UNLCK,
     ]
     assert all(size == 1 for _, _, size in windows_api.calls)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("参考答案与评分标准", "answer_candidate"),
+        ("高中语文试卷 选择题", "exam_candidate"),
+        ("这是无标记的公开文档", "document_unknown"),
+    ),
+)
+def test_pdf_auto_classification_has_direct_answer_exam_and_unknown_branches(
+    tmp_path, monkeypatch, text, expected
+):
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(b"fixture")
+    monkeypatch.setattr(intake, "_first_two_pdf_pages_text", lambda _: text)
+
+    assert classify_material(source) == expected
+
+
+def test_pdf_auto_classification_degrades_parse_failure_to_unknown(tmp_path):
+    source = tmp_path / "broken.pdf"
+    source.write_bytes(b"not a PDF")
+
+    assert classify_material(source) == "document_unknown"
+
+
+def test_archive_inputs_explicit_roles_override_filename_and_pdf_guessing(tmp_path):
+    exam = tmp_path / "参考答案.pdf"
+    answer = tmp_path / "语文试卷.md"
+    exam.write_bytes(b"not parsed because role is explicit")
+    answer.write_text("名称不决定角色", encoding="utf-8")
+    _, task = _new_task(tmp_path)
+
+    updated = archive_inputs(task, (exam, answer), roles=("exam", "answer"))
+
+    assert [record.material_type for record in updated.materials] == [
+        "exam_candidate",
+        "answer_candidate",
+    ]
+
+
+def test_archive_inputs_rejects_explicit_role_for_non_document_without_copying(tmp_path):
+    source = tmp_path / "lesson.mp4"
+    source.write_bytes(b"video")
+    layout, task = _new_task(tmp_path)
+
+    with pytest.raises(ValueError, match="document"):
+        archive_inputs(task, (source,), roles=("exam",))
+
+    assert list(layout.inputs.iterdir()) == []

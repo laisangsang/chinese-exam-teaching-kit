@@ -19,7 +19,7 @@ cekit release-audit
 python -m build
 ```
 
-`release-audit` 是公开表面检查，不代替贡献者对版权、授权、匿名化和事实准确性的判断。仓库中的 GitHub Actions 是待公开仓库配置的自动检查；本地通过不等于远端工作流已经运行。
+`release-audit` 是公开表面检查，不代替贡献者对版权、授权、匿名化和事实准确性的判断。公开仓库的 GitHub Actions 会在 PR 上执行受保护的跨平台测试与 `release-audit`；本地通过仍不能替代当前提交的远端绿色检查。
 
 ## 提交过程
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from importlib.resources import files
@@ -16,6 +17,10 @@ TEMPLATE_VARIABLE_RE = re.compile(r"\$\{[^{}\n]+\}")
 QUESTION_NUMBER_RE = re.compile(r"第?\s*\d+\s*题")
 OPTION_REFERENCE_RE = re.compile(r"(?<![A-Za-z])([A-D])\s*项", re.IGNORECASE)
 HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", re.DOTALL)
+JSON_FENCE_RE = re.compile(r"```json\s*(?P<payload>\{.*?\})\s*```", re.DOTALL)
+SCORE_HEADING_RE = re.compile(
+    r"^【(?P<label>官方|建议)分值构成】\s*[：:]\s*(?P<question>\S.*)$"
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,14 @@ class _Heading:
     end: int
     body: str
     direct_body: str
+
+
+@dataclass(frozen=True)
+class _InventoryQuestion:
+    question_id: str
+    kind: str
+    score: int | float | None
+    options: tuple[str, ...] = ()
 
 
 def _issue_key(issue: ValidationIssue) -> tuple[object, ...]:
@@ -337,6 +350,283 @@ def _validate_evidence_layers(
     return issues
 
 
+def _json_object_from_heading(heading: _Heading) -> Mapping[str, Any] | None:
+    matches = tuple(JSON_FENCE_RE.finditer(heading.direct_body))
+    if len(matches) != 1:
+        return None
+    try:
+        payload = json.loads(matches[0].group("payload"))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _question_inventory(
+    text: str,
+    *,
+    display_path: str,
+    module_id: str,
+    template: bool,
+) -> tuple[tuple[_InventoryQuestion, ...], list[ValidationIssue]]:
+    if template:
+        return (), []
+    heading = _matching_heading(_headings(text), "题目清单")
+    if heading is None:
+        return (), [
+            ValidationIssue(
+                "error",
+                "missing_question_inventory",
+                display_path,
+                "正式板块缺少结构化题目清单",
+                module=module_id,
+                section="题目清单",
+            )
+        ]
+    payload = _json_object_from_heading(heading)
+    if (
+        payload is None
+        or set(payload) != {"schema_version", "questions"}
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("questions"), list)
+    ):
+        return (), [
+            ValidationIssue(
+                "error",
+                "invalid_question_inventory",
+                display_path,
+                "题目清单必须是 schema_version=1 的单个 JSON 对象",
+                heading.line,
+                module_id,
+                "题目清单",
+            )
+        ]
+    questions: list[_InventoryQuestion] = []
+    seen: set[str] = set()
+    issues: list[ValidationIssue] = []
+    for raw in payload["questions"]:
+        valid = isinstance(raw, dict)
+        question_id = raw.get("id") if valid else None
+        kind = raw.get("kind") if valid else None
+        score = raw.get("score") if valid else None
+        options = raw.get("options", []) if valid else []
+        normalized_id = question_id.strip() if isinstance(question_id, str) else ""
+        normalized_options = (
+            tuple(item.strip() for item in options)
+            if isinstance(options, list)
+            and all(isinstance(item, str) for item in options)
+            else ()
+        )
+        valid_score = score is None or (
+            isinstance(score, (int, float))
+            and not isinstance(score, bool)
+            and math.isfinite(score)
+            and score > 0
+        )
+        valid_options = (
+            isinstance(options, list)
+            and all(isinstance(item, str) and item.strip() for item in options)
+            and len(normalized_options) == len(set(normalized_options))
+        )
+        if (
+            not valid
+            or not isinstance(question_id, str)
+            or not normalized_id
+            or normalized_id in seen
+            or kind not in {"choice", "subjective", "composition", "other"}
+            or not valid_score
+            or not valid_options
+            or (kind == "choice" and not options)
+            or (kind != "choice" and bool(options))
+        ):
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "invalid_question_inventory",
+                    display_path,
+                    "题目清单含有无效、重复或类型不匹配的题目记录",
+                    heading.line,
+                    module_id,
+                    "题目清单",
+                )
+            )
+            continue
+        seen.add(normalized_id)
+        questions.append(
+            _InventoryQuestion(
+                normalized_id,
+                str(kind),
+                score,
+                normalized_options,
+            )
+        )
+    return tuple(questions), issues
+
+
+def _question_blocks_by_id(text: str, kind: str) -> dict[str, _Heading]:
+    blocks: dict[str, _Heading] = {}
+    for block in _question_headings(text, kind):
+        title = _normalized_heading(block.title)
+        match = re.fullmatch(rf"{re.escape(kind)}\s*[：:]\s*(\S.*)", title)
+        if match:
+            blocks[match.group(1).strip()] = block
+    return blocks
+
+
+def _validate_score_allocations(
+    text: str,
+    inventory: tuple[_InventoryQuestion, ...],
+    *,
+    display_path: str,
+    module_id: str,
+) -> list[ValidationIssue]:
+    headings: dict[str, list[_Heading]] = {}
+    for heading in _headings(text):
+        title = re.sub(r"[*_`]+", "", heading.title).strip()
+        match = SCORE_HEADING_RE.fullmatch(title)
+        if match:
+            headings.setdefault(match.group("question").strip(), []).append(heading)
+    scored = {question.question_id: question for question in inventory if question.score is not None}
+    issues: list[ValidationIssue] = []
+    for question_id, question in scored.items():
+        blocks = headings.get(question_id, [])
+        if len(blocks) != 1:
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "missing_score_allocation" if not blocks else "duplicate_score_allocation",
+                    display_path,
+                    f"{question_id}必须且只能有一个官方或建议分值构成",
+                    module=module_id,
+                    section="分值构成",
+                )
+            )
+            continue
+        issue = _score_allocation_issue(blocks[0], question)
+        if issue is not None:
+            code, message = issue
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    code,
+                    display_path,
+                    message,
+                    blocks[0].line,
+                    module_id,
+                    "分值构成",
+                )
+            )
+    for question_id, blocks in headings.items():
+        if question_id not in scored:
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "unexpected_score_allocation",
+                    display_path,
+                    f"{question_id}不在带题面总分的题目清单中",
+                    blocks[0].line,
+                    module_id,
+                    "分值构成",
+                )
+            )
+    return issues
+
+
+def _score_allocation_issue(
+    heading: _Heading, question: _InventoryQuestion
+) -> tuple[str, str] | None:
+    payload = _json_object_from_heading(heading)
+    if payload is None:
+        return "invalid_score_allocation", f"{question.question_id}的分值构成必须含单个 JSON 对象"
+    required = {
+        "schema_version",
+        "question_id",
+        "total",
+        "mode",
+        "components",
+        "cap",
+        "substitution_groups",
+    }
+    if not required <= set(payload) or payload.get("schema_version") != 1:
+        return "invalid_score_allocation", f"{question.question_id}的分值构成字段不完整"
+    if payload.get("question_id") != question.question_id or payload.get("total") != question.score:
+        return "score_total_mismatch", f"{question.question_id}的标识或总分与题目清单不一致"
+    cap = payload.get("cap")
+    if (
+        not isinstance(cap, dict)
+        or cap.get("points") != question.score
+        or not isinstance(cap.get("rule"), str)
+        or not cap["rule"].strip()
+    ):
+        return "invalid_score_cap", f"{question.question_id}缺少与题面总分一致的封顶规则"
+    components = payload.get("components")
+    groups = payload.get("substitution_groups")
+    if not isinstance(components, list) or not isinstance(groups, list):
+        return "invalid_score_allocation", f"{question.question_id}的计分单元或替代组格式无效"
+    if payload.get("mode") == "holistic":
+        bands = payload.get("bands")
+        if (
+            components
+            or groups
+            or not isinstance(payload.get("holistic_rule"), str)
+            or not payload["holistic_rule"].strip()
+            or not isinstance(bands, list)
+            or not bands
+        ):
+            return "invalid_holistic_allocation", f"{question.question_id}的整体评分边界不完整"
+        expected_min: int | float = 0
+        for band in bands:
+            if (
+                not isinstance(band, dict)
+                or band.get("min") != expected_min
+                or not isinstance(band.get("max"), (int, float))
+                or isinstance(band.get("max"), bool)
+                or band["max"] < band["min"]
+                or not isinstance(band.get("rule"), str)
+                or not band["rule"].strip()
+            ):
+                return "invalid_holistic_allocation", f"{question.question_id}的整体评分档位必须连续且有裁量规则"
+            expected_min = band["max"] + 1
+        if bands[-1]["max"] != question.score:
+            return "score_total_mismatch", f"{question.question_id}的整体评分档位未覆盖题面总分"
+        return None
+    if payload.get("mode") != "additive" or not components:
+        return "invalid_score_allocation", f"{question.question_id}的计分模式无效"
+    points: dict[str, int | float] = {}
+    for component in components:
+        if (
+            not isinstance(component, dict)
+            or not isinstance(component.get("id"), str)
+            or not component["id"].strip()
+            or component["id"] in points
+            or not isinstance(component.get("label"), str)
+            or not component["label"].strip()
+            or not isinstance(component.get("points"), (int, float))
+            or isinstance(component.get("points"), bool)
+            or component["points"] <= 0
+        ):
+            return "invalid_score_allocation", f"{question.question_id}含无效计分单元"
+        points[component["id"]] = component["points"]
+    grouped: set[str] = set()
+    grouped_max = 0
+    for group in groups:
+        identifiers = group.get("component_ids") if isinstance(group, dict) else None
+        if (
+            not isinstance(identifiers, list)
+            or len(identifiers) < 2
+            or len(identifiers) != len(set(identifiers))
+            or any(identifier not in points or identifier in grouped for identifier in identifiers)
+            or not isinstance(group.get("rule"), str)
+            or not group["rule"].strip()
+        ):
+            return "invalid_substitution_group", f"{question.question_id}的替代关系无效或重复计分"
+        grouped.update(identifiers)
+        grouped_max += max(points[identifier] for identifier in identifiers)
+    effective = sum(value for key, value in points.items() if key not in grouped) + grouped_max
+    if effective != question.score:
+        return "score_total_mismatch", f"{question.question_id}的有效分值之和不等于题面总分"
+    return None
+
+
 def _question_headings(text: str, kind: str) -> tuple[_Heading, ...]:
     headings = _headings(text)
     selected: list[_Heading] = []
@@ -384,12 +674,43 @@ def _validate_choice_evidence(
     module_id: str,
     module: Mapping[str, Any],
     contract: Mapping[str, Any],
+    inventory: tuple[_InventoryQuestion, ...] | None = None,
 ) -> list[ValidationIssue]:
-    if not module.get("requires_choice_evidence", False):
+    if inventory is not None:
+        declared = {item.question_id: item for item in inventory if item.kind == "choice"}
+        blocks_by_id = _question_blocks_by_id(text, "选择题")
+        issues = [
+            ValidationIssue(
+                "error",
+                "unexpected_question_block",
+                display_path,
+                f"选择题{question_id}未在题目清单中声明",
+                block.line,
+                module_id,
+                "选择题逐项证据",
+            )
+            for question_id, block in blocks_by_id.items()
+            if question_id not in declared
+        ]
+        blocks = tuple(blocks_by_id[question_id] for question_id in declared if question_id in blocks_by_id)
+        for question_id in declared.keys() - blocks_by_id.keys():
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "missing_option_evidence",
+                    display_path,
+                    f"{question_id}缺少按选项组织的证据核对",
+                    module=module_id,
+                    section="选择题逐项证据",
+                )
+            )
+    elif not module.get("requires_choice_evidence", False):
         return []
-    blocks = _question_headings(text, "选择题")
+    else:
+        blocks = _question_headings(text, "选择题")
+        issues = []
     if not blocks:
-        return [
+        return issues + ([
             ValidationIssue(
                 "error",
                 "missing_option_evidence",
@@ -398,12 +719,16 @@ def _validate_choice_evidence(
                 module=module_id,
                 section="选择题逐项证据",
             )
-        ]
-    choices = tuple(str(item) for item in contract["validation"].get("choice_options", []))
+        ] if inventory is None else [])
     fields = contract["validation"].get("option_evidence_fields", {})
-    issues: list[ValidationIssue] = []
     for block in blocks:
         sections = _option_sections(block)
+        block_id = re.split(r"[：:]", _normalized_heading(block.title), maxsplit=1)[-1].strip()
+        choices = (
+            declared[block_id].options
+            if inventory is not None
+            else tuple(str(item) for item in contract["validation"].get("choice_options", []))
+        )
         for choice in choices:
             section = sections.get(choice)
             missing = []
@@ -437,12 +762,43 @@ def _validate_subjective_chain(
     module_id: str,
     module: Mapping[str, Any],
     contract: Mapping[str, Any],
+    inventory: tuple[_InventoryQuestion, ...] | None = None,
 ) -> list[ValidationIssue]:
-    if not module.get("requires_subjective_chain", False):
+    if inventory is not None:
+        declared = {item.question_id for item in inventory if item.kind == "subjective"}
+        blocks_by_id = _question_blocks_by_id(text, "主观题")
+        issues = [
+            ValidationIssue(
+                "error",
+                "unexpected_question_block",
+                display_path,
+                f"主观题{question_id}未在题目清单中声明",
+                block.line,
+                module_id,
+                "主观题答案生成",
+            )
+            for question_id, block in blocks_by_id.items()
+            if question_id not in declared
+        ]
+        blocks = tuple(blocks_by_id[question_id] for question_id in declared if question_id in blocks_by_id)
+        for question_id in declared - blocks_by_id.keys():
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "missing_subjective_chain",
+                    display_path,
+                    f"{question_id}缺少按题组织的主观题答案生成链",
+                    module=module_id,
+                    section="主观题答案生成",
+                )
+            )
+    elif not module.get("requires_subjective_chain", False):
         return []
-    blocks = _question_headings(text, "主观题")
+    else:
+        blocks = _question_headings(text, "主观题")
+        issues = []
     if not blocks:
-        return [
+        return issues + ([
             ValidationIssue(
                 "error",
                 "missing_subjective_chain",
@@ -451,9 +807,8 @@ def _validate_subjective_chain(
                 module=module_id,
                 section="主观题答案生成",
             )
-        ]
+        ] if inventory is None else [])
     fields = contract["validation"].get("subjective_steps", {})
-    issues: list[ValidationIssue] = []
     for block in blocks:
         missing = [
             field
@@ -539,6 +894,19 @@ def validate_file(
             contract=loaded,
         )
     )
+    inventory, inventory_issues = _question_inventory(
+        text,
+        display_path=display_path,
+        module_id=module_id,
+        template=template,
+    )
+    issues.extend(inventory_issues)
+    inventory_for_validation = (
+        None
+        if template
+        or any(issue.code == "missing_question_inventory" for issue in inventory_issues)
+        else inventory
+    )
     issues.extend(
         _validate_choice_evidence(
             text,
@@ -546,6 +914,7 @@ def validate_file(
             module_id=module_id,
             module=module,
             contract=loaded,
+            inventory=inventory_for_validation,
         )
     )
     issues.extend(
@@ -555,8 +924,18 @@ def validate_file(
             module_id=module_id,
             module=module,
             contract=loaded,
+            inventory=inventory_for_validation,
         )
     )
+    if inventory_for_validation is not None:
+        issues.extend(
+            _validate_score_allocations(
+                text,
+                inventory,
+                display_path=display_path,
+                module_id=module_id,
+            )
+        )
     return _ordered(issues)
 
 
