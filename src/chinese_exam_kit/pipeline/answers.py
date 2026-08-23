@@ -50,6 +50,7 @@ def attach_reference_answers(
     safe_path = safe_task_path(project_root, absolute)
     with task_lock(safe_path.parent):
         task = load_task(safe_path)
+        _ensure_answer_storage_safe(task.workspace)
         known = {record.sha256 for record in task.materials}
         archived = archive_inputs(task, tuple(Path(path) for path in supplied_paths))
         added = tuple(record.sha256 for record in archived.materials if record.sha256 not in known)
@@ -139,6 +140,7 @@ def _load_ledger(path: Path) -> dict[str, object]:
 
 
 def _write_current_revision(task: PipelineTask) -> str | None:
+    _ensure_answer_storage_safe(task.workspace)
     digests = tuple(
         sorted(
             record.sha256
@@ -157,6 +159,7 @@ def _write_current_revision(task: PipelineTask) -> str | None:
 
 
 def _snapshot_previous_outputs(task: PipelineTask, answer_digest: str) -> str:
+    _ensure_answer_storage_safe(task.workspace)
     revision = task.workspace / "answers" / "revisions" / answer_digest[:16]
     if revision.is_symlink():
         raise ValueError("answer revision directory cannot be a symlink")
@@ -194,6 +197,30 @@ def _snapshot_previous_outputs(task: PipelineTask, answer_digest: str) -> str:
         },
     )
     return manifest.relative_to(task.workspace).as_posix()
+
+
+def _ensure_answer_storage_safe(workspace: Path) -> None:
+    """Reject every existing symlink component before answer-ledger writes."""
+    root = Path(workspace)
+    try:
+        resolved_root = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError("answer storage is unsafe") from None
+    for target in (root / "answers", root / "answers" / "revisions"):
+        cursor = root
+        for part in target.relative_to(root).parts:
+            cursor = cursor / part
+            try:
+                if cursor.is_symlink():
+                    raise ValueError("answer storage contains a symlink")
+                if cursor.exists() and not cursor.is_dir():
+                    raise ValueError("answer storage is unsafe")
+            except OSError:
+                raise ValueError("answer storage is unsafe") from None
+        try:
+            target.resolve(strict=False).relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError("answer storage is unsafe") from None
 
 
 def _atomic_bytes(destination: Path, contents: bytes) -> Path:

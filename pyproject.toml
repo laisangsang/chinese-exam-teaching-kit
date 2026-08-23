@@ -1,10 +1,12 @@
 [build-system]
-requires = ["setuptools>=70", "wheel>=0.43"]
+requires = ["setuptools>=77", "wheel>=0.43"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "chinese-exam-teaching-kit"
 version = "0.1.0"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 dependencies = ["python-docx>=1.1.2,<2", "pypdf>=5,<7"]
 

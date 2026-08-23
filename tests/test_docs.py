@@ -41,6 +41,7 @@ OFFICIAL_EXTERNAL_URLS = {
     "https://code.claude.com/docs/en/memory",
     "https://cloud.tencent.com/document/product/1831/134362",
     "https://developers.openai.com/",
+    "https://developers.openai.com/codex/agent-configuration/agents-md",
 }
 
 
@@ -165,7 +166,7 @@ def test_external_links_are_limited_to_verified_official_sources():
     assert {
         "https://code.claude.com/docs/en/memory",
         "https://cloud.tencent.com/document/product/1831/134362",
-        "https://developers.openai.com/",
+        "https://developers.openai.com/codex/agent-configuration/agents-md",
     } <= external
 
 
@@ -178,3 +179,31 @@ def test_public_docs_have_no_placeholders_or_host_specific_paths():
         assert placeholder.search(text) is None, path
         assert posix_home.search(text) is None, path
         assert windows_home.search(text) is None, path
+
+
+def test_current_main_docs_do_not_claim_the_public_release_is_still_private_or_unreleased():
+    current_status_docs = (
+        ROOT / "README.md",
+        ROOT / "CHANGELOG.md",
+        ROOT / "CONTRIBUTING.md",
+        ROOT / "SECURITY.md",
+        ROOT / "docs/架构与开发.md",
+        ROOT / "docs/完整安装说明.md",
+        ROOT / "docs/release/v0.1.0-checklist.md",
+    )
+    stale_phrases = (
+        "GitHub 尚未公开",
+        "尚未创建正式 Release",
+        "正在准备首次公开发行",
+        "首次公开发行准备阶段",
+        "待公开仓库配置",
+        "未声明远端 CI 已验证",
+    )
+
+    for path in current_status_docs:
+        text = path.read_text(encoding="utf-8")
+        assert not any(phrase in text for phrase in stale_phrases), path
+
+    checklist = (ROOT / "docs/release/v0.1.0-checklist.md").read_text(encoding="utf-8")
+    assert "历史快照" in checklist
+    assert "最终结果" in checklist

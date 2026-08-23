@@ -100,6 +100,13 @@ def test_empty_public_library_is_valid(tmp_path):
     assert result.cards == ()
 
 
+def test_default_knowledge_contract_is_a_packaged_resource(tmp_path):
+    contract = load_contract()
+
+    assert contract["schema_version"] == 1
+    assert validate_library(tmp_path, contract).errors == ()
+
+
 def test_empty_index_has_no_fake_timestamp_or_cards(tmp_path):
     contract = load_contract(Path("config/knowledge_contract.json"))
 

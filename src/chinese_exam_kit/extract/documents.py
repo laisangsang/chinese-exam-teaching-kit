@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
 
-from .providers import CapabilityUnavailable, OcrProvider, Renderer, TextReader
+from .providers import (
+    CapabilityUnavailable,
+    OcrProvider,
+    Renderer,
+    TextReader,
+    default_ocr_provider,
+)
 
 
 TEXT_LAYER_MINIMUM_CHARACTERS = 80
@@ -99,9 +105,7 @@ def extract_document(
         return ExtractionResult(pages, "text_layer")
 
     if ocr is None:
-        from .macos import MacOSVisionOcr
-
-        ocr = MacOSVisionOcr()
+        ocr = default_ocr_provider()
     if ocr is None or not ocr.available():
         message = getattr(ocr, "message", "OCR unavailable; provide a local OcrProvider")
         raise CapabilityUnavailable(message)

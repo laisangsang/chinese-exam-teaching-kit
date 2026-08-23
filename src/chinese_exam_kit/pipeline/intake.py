@@ -46,26 +46,48 @@ def classify_material(path: Path) -> str:
     return "document_unknown"
 
 
-def archive_inputs(task: PipelineTask, paths: Sequence[Path]) -> PipelineTask:
+def archive_inputs(
+    task: PipelineTask,
+    paths: Sequence[Path],
+    *,
+    roles: Sequence[Literal["auto", "exam", "answer"]] | None = None,
+) -> PipelineTask:
     """Copy supported files into the task, deduplicating them by SHA-256."""
+    role_items = tuple(roles) if roles is not None else ("auto",) * len(paths)
+    if len(role_items) != len(paths):
+        raise ValueError("input roles must correspond one-to-one with paths")
     archive_dir = task.workspace / "inputs"
     _ensure_archive_containment(task.workspace, archive_dir)
-    prepared: list[tuple[Path, str]] = []
-    for raw_path in paths:
+    prepared: list[tuple[Path, str, str]] = []
+    for raw_path, role in zip(paths, role_items, strict=True):
         source = Path(raw_path)
-        prepared.append((source, classify_material(source)))
+        if role == "auto":
+            material_type = classify_material(source)
+        elif role in {"exam", "answer"}:
+            if not source.is_file():
+                raise ValueError("explicit document input is unavailable")
+            if source.suffix.lower() not in DOCUMENT_SUFFIXES:
+                raise ValueError("explicit input role requires a supported document")
+            material_type = f"{role}_candidate"
+        else:
+            raise ValueError("unknown explicit input role")
+        prepared.append((source, material_type, role))
 
     materials = list(task.materials)
     indexes = {record.sha256: index for index, record in enumerate(materials)}
     created_destinations: list[Path] = []
     with _archive_lock(archive_dir):
         try:
-            for source, material_type in prepared:
+            for source, material_type, role in prepared:
                 staged, digest, size_bytes = _stage_source(source, archive_dir)
                 try:
                     existing_index = indexes.get(digest)
                     if existing_index is not None:
                         record = materials[existing_index]
+                        if record.material_type != material_type and role != "auto":
+                            raise ValueError(
+                                "identical input bytes cannot have conflicting explicit roles"
+                            )
                         destination = task.workspace / record.archived_path
                         _publish_staged_copy(staged, destination, digest)
                         duplicates = tuple(

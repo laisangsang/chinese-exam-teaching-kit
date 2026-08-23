@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from chinese_exam_kit.cli import main
+from chinese_exam_kit.pipeline.state import load_task
 from tests._host_samples import file_uri, posix_path, unc_path, windows_path
 
 
@@ -24,7 +27,8 @@ def test_cli_init_run_status_json_is_agent_neutral_and_redacted(tmp_path, capsys
     assert payload["task"] == init_output
     assert str(tmp_path) not in raw
     assert "我的原创试卷.md" not in raw
-    assert payload["stages"]["analysis"]["status"] == "waiting"
+    assert payload["stages"]["knowledge_pre"]["status"] == "waiting"
+    assert payload["stages"]["analysis"]["status"] == "pending"
     assert task_path.is_file()
 
 
@@ -153,3 +157,82 @@ def test_cli_accepts_equivalent_macos_var_alias_for_project_content(tmp_path, mo
 
     assert code == 0
     assert "通过" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("suffix", (".md", ".txt", ".docx", ".pdf"))
+def test_cli_explicit_exam_and_answer_roles_bind_every_document_format(
+    tmp_path, monkeypatch, capsys, suffix
+):
+    monkeypatch.chdir(tmp_path)
+    exam = tmp_path / f"exam{suffix}"
+    answer = tmp_path / f"answer{suffix}"
+    exam.write_bytes(b"explicit exam bytes")
+    answer.write_bytes(b"explicit answer bytes")
+
+    code = main(
+        [
+            "init",
+            "--name",
+            f"roles-{suffix[1:]}",
+            "--exam",
+            str(exam),
+            "--answer",
+            str(answer),
+        ]
+    )
+
+    assert code == 0
+    task_path = tmp_path / capsys.readouterr().out.strip()
+    task = load_task(task_path)
+    assert [record.material_type for record in task.materials] == [
+        "exam_candidate",
+        "answer_candidate",
+    ]
+
+
+def test_cli_explicit_pdf_role_does_not_parse_invalid_pdf(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"not a PDF")
+
+    assert main(["init", "--name", "broken", "--exam", str(broken)]) == 0
+    task = load_task(tmp_path / capsys.readouterr().out.strip())
+
+    assert task.materials[0].material_type == "exam_candidate"
+
+
+def test_cli_init_requires_at_least_one_input_role(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["init", "--name", "empty"]) == 2
+    assert not (tmp_path / ".local").exists()
+    assert str(tmp_path) not in capsys.readouterr().err
+
+
+def test_initial_explicit_answer_is_bound_before_knowledge_pause(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    exam = tmp_path / "exam.md"
+    answer = tmp_path / "answer.md"
+    exam.write_text("# 试卷\n\n1. 原创题。\n", encoding="utf-8")
+    answer.write_text("# 参考答案\n\n1. 原创答案。\n", encoding="utf-8")
+    assert main(
+        ["init", "--name", "bound", "--exam", str(exam), "--answer", str(answer)]
+    ) == 0
+    task_value = capsys.readouterr().out.strip()
+
+    assert main(["run", "--task", task_value]) == 0
+
+    marker = tmp_path / task_value
+    payload = json.loads(
+        (marker.parent / "answers" / "current_revision.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    answer_record = next(
+        record
+        for record in load_task(marker).materials
+        if record.material_type == "answer_candidate"
+    )
+    assert payload["answer_sha256"] == [answer_record.sha256]

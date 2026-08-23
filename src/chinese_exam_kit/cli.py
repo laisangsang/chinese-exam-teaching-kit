@@ -44,7 +44,9 @@ def _parser() -> argparse.ArgumentParser:
 
     init = commands.add_parser("init", help="create a private local task")
     init.add_argument("--name", required=True)
-    init.add_argument("--input", required=True, action="append", dest="inputs")
+    init.add_argument("--input", action="append", dest="inputs")
+    init.add_argument("--exam", action="append", dest="exams")
+    init.add_argument("--answer", action="append", dest="answers")
 
     run = commands.add_parser("run", help="run or resume a local task")
     run.add_argument("--task", required=True)
@@ -83,7 +85,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return _doctor(args)
         if args.command == "init":
-            return _init(root, args.name, args.inputs)
+            return _init(
+                root,
+                args.name,
+                args.inputs or [],
+                args.exams or [],
+                args.answers or [],
+            )
         if args.command == "run":
             summary = PipelineRunner(root).resume(args.task)
             print(_summary_text(summary.status))
@@ -166,15 +174,27 @@ def _release_audit(root: Path, json_output: bool) -> int:
     return 1 if any(issue.level == "error" for issue in issues) else 0
 
 
-def _init(root: Path, name: str, inputs: list[str]) -> int:
+def _init(
+    root: Path,
+    name: str,
+    inputs: list[str],
+    exams: list[str] | None = None,
+    answers: list[str] | None = None,
+) -> int:
+    exams = exams or []
+    answers = answers or []
+    if not inputs and not exams and not answers:
+        raise ValueError("at least one input is required")
     slug = _slugify(name)
     layout = WorkspaceLayout.create(root, slug)
     task_path = layout.root / "task.json"
     if task_path.exists():
         raise ValueError("同名任务已经存在")
     task = PipelineTask.create(slug, name.strip(), layout.root)
-    sources = tuple(_relative_or_external_input(root, value) for value in inputs)
-    task = archive_inputs(task, sources)
+    values = (*inputs, *exams, *answers)
+    roles = (*("auto" for _ in inputs), *("exam" for _ in exams), *("answer" for _ in answers))
+    sources = tuple(_relative_or_external_input(root, value) for value in values)
+    task = archive_inputs(task, sources, roles=roles)
     save_task(task)
     print(_display_path(root, task_path))
     return 0

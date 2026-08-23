@@ -3,7 +3,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from chinese_exam_kit.pipeline.models import MaterialRecord, PipelineTask, STAGES
+from chinese_exam_kit.pipeline.models import MaterialRecord, PipelineTask, STAGES, StageRecord
 from chinese_exam_kit.pipeline.state import load_task, save_task, transition_stage
 from chinese_exam_kit.workspace import WorkspaceLayout
 from tests._host_samples import posix_path
@@ -133,3 +133,17 @@ def test_save_task_does_not_follow_a_preexisting_partial_symlink(tmp_path):
 
     assert saved.is_file()
     assert outside.read_text(encoding="utf-8") == "do not overwrite"
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    (
+        {"event": "bad", "value": float("nan")},
+        {"event": "bad", "value": {1, 2}},
+        {"event": "bad", "value": object()},
+        {1: "non-string key"},
+    ),
+)
+def test_stage_event_values_are_json_safe_at_model_construction(unsafe):
+    with pytest.raises(ValueError, match="JSON-safe"):
+        StageRecord(events=(unsafe,))

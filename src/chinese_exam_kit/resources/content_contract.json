@@ -31,6 +31,16 @@
       "C",
       "D"
     ],
+    "question_inventory": {
+      "heading": "题目清单",
+      "schema_version": 1,
+      "kinds": ["choice", "subjective", "composition", "other"]
+    },
+    "score_allocation": {
+      "labels": ["官方分值构成", "建议分值构成"],
+      "modes": ["additive", "holistic"],
+      "requires_cap": true
+    },
     "option_evidence_fields": {
       "原文位置": [
         "原文位置",

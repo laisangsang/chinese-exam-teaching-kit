@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -26,10 +27,16 @@ STATUSES = frozenset(
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze(item) for key, item in value.items()})
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("pipeline event values must be JSON-safe")
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(_freeze(item) for item in value)
-    return value
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    raise ValueError("pipeline event values must be JSON-safe")
 
 
 def _thaw(value: Any) -> Any:

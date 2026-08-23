@@ -27,7 +27,39 @@ def _create_task(project: Path, *, media: bool = False) -> Path:
         inputs.append(video)
     layout = WorkspaceLayout.create(project, "original-demo")
     task = PipelineTask.create("original-demo", "原创示例", layout.root)
-    return save_task(archive_inputs(task, inputs))
+    task = archive_inputs(task, inputs)
+    task_path = save_task(task)
+    exam_record = next(
+        record for record in task.materials if record.material_type not in {"audio", "video"}
+    )
+    knowledge = task.workspace / "knowledge"
+    knowledge.mkdir(parents=True, exist_ok=True)
+    (knowledge / "question-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "questions": [
+                    {
+                        "question_id": "Q1",
+                        "source_sha256": exam_record.sha256,
+                        "source_ordinal": 1,
+                        "question_number": 1,
+                        "page_start": 1,
+                        "module": "reading_1",
+                        "question_type": "原创简答",
+                        "abilities": ["文本取证"],
+                        "task_statement": "根据原创题面完成回答。",
+                        "evidence_anchor": "第1题题面。",
+                        "answer_boundary": "不得超出原创题面证据。",
+                        "retrieval_queries": ["原创简答 文本取证"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return task_path
 
 
 def _write_valid_analysis(task_path: Path) -> Path:
@@ -36,6 +68,30 @@ def _write_valid_analysis(task_path: Path) -> Path:
     source = content / "00_整卷总览与讲评建议.md"
     source.write_text(
         "# 原创试卷讲评总览\n\n本稿依据原创题面，供教师进行课堂讲评与迁移训练。\n",
+        encoding="utf-8",
+    )
+    knowledge = task_path.parent / "knowledge"
+    knowledge.mkdir(parents=True, exist_ok=True)
+    (knowledge / "post-review.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "questions": [
+                    {
+                        "question_id": "Q1",
+                        "conflict": {
+                            "status": "none",
+                            "reason": "原创题面未发现与已检索知识冲突。",
+                        },
+                        "candidate": {
+                            "status": "none",
+                            "reason": "本次分析未形成可独立沉淀的新方法。",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     return source
@@ -306,23 +362,237 @@ def test_extract_receipt_never_trusts_artifacts_reached_through_nested_symlink(t
     assert load_task(task_path).stages["extract"].status == "failed"
 
 
-def test_missing_knowledge_audits_are_rebuilt_at_their_own_stages(tmp_path):
+def test_missing_question_manifest_keeps_knowledge_pre_waiting(tmp_path):
+    task_path = _create_task(tmp_path)
+    (task_path.parent / "knowledge" / "question-manifest.json").unlink()
+    runner = PipelineRunner(tmp_path)
+
+    summary = runner.resume(task_path)
+
+    assert summary.status == "needs_user_input"
+    assert summary.stage("knowledge_pre").status == "waiting"
+    assert summary.stage("analysis").status == "pending"
+    assert not (task_path.parent / "knowledge" / "pre-receipt.json").exists()
+    assert (task_path.parent / "work_orders" / "knowledge-pre.md").is_file()
+
+
+def test_knowledge_pre_receipt_uses_manifest_matches_and_audit_events(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+
+    summary = runner.resume(task_path)
+
+    receipt = json.loads(
+        (task_path.parent / "knowledge" / "pre-receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    audit = task_path.parent / receipt["audit_path"]
+    events = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
+    assert summary.stage("knowledge_pre").status == "completed"
+    assert receipt["completed_question_ids"] == ["Q1"]
+    assert receipt["decisions"] == [
+        {
+            "applicability": "not_applicable",
+            "applicable_card_ids": [],
+            "question_id": "Q1",
+            "reason": "公共知识库没有达到适用门槛的知识卡。",
+        }
+    ]
+    assert any(
+        event["stage"] == "pre"
+        and event["event"] == "search"
+        and event["applicability"] == "not_applicable"
+        and event["details"]["question_id"] == "Q1"
+        for event in events
+    )
+
+
+def test_knowledge_pre_repairs_a_semantically_forged_audit_prefix(tmp_path):
     task_path = _create_task(tmp_path)
     runner = PipelineRunner(tmp_path)
     runner.resume(task_path)
-    pre = task_path.parent / "knowledge" / "pre_audit.json"
-    pre.unlink()
+    receipt_path = task_path.parent / "knowledge" / "pre-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    audit_path = task_path.parent / receipt["audit_path"]
+    forged = {
+        "timestamp": "2026-08-23T00:00:00+00:00",
+        "task_id": "original-demo",
+        "stage": "pre",
+        "event": "search",
+        "card_id": None,
+        "applicability": "not_applicable",
+        "reason": "伪造的非本题结论。",
+        "details": {"question_id": "Q999", "applicable_card_ids": []},
+    }
+    forged_bytes = (
+        json.dumps(forged, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    audit_path.write_bytes(forged_bytes)
+    receipt["audit_event_count"] = 1
+    receipt["audit_prefix_sha256"] = hashlib.sha256(forged_bytes).hexdigest()
+    receipt_path.write_text(
+        json.dumps(receipt, ensure_ascii=False), encoding="utf-8"
+    )
 
     runner.resume(task_path)
-    assert pre.is_file()
+
+    repaired = json.loads(receipt_path.read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert repaired["audit_event_count"] == 2
+    assert events[-1]["details"]["question_id"] == "Q1"
+    assert events[-1]["reason"] == "公共知识库没有达到适用门槛的知识卡。"
+
+
+def test_knowledge_pre_rejects_unknown_manifest_module(tmp_path):
+    task_path = _create_task(tmp_path)
+    manifest_path = task_path.parent / "knowledge" / "question-manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["questions"][0]["module"] = "not-a-public-module"
+    manifest_path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    summary = PipelineRunner(tmp_path).resume(task_path)
+
+    assert summary.stage("knowledge_pre").status == "waiting"
+    assert not (task_path.parent / "knowledge" / "pre-receipt.json").exists()
+
+
+def test_knowledge_pre_rejects_ancestor_symlink_without_external_write(tmp_path):
+    task_path = _create_task(tmp_path)
+    knowledge = task_path.parent / "knowledge"
+    manifest = (knowledge / "question-manifest.json").read_bytes()
+    (knowledge / "question-manifest.json").unlink()
+    knowledge.rmdir()
+    outside = tmp_path / "outside-knowledge"
+    outside.mkdir()
+    (outside / "question-manifest.json").write_bytes(manifest)
+    knowledge.symlink_to(outside, target_is_directory=True)
+
+    summary = PipelineRunner(tmp_path).resume(task_path)
+
+    assert summary.stage("knowledge_pre").status == "waiting"
+    assert sorted(path.name for path in outside.iterdir()) == ["question-manifest.json"]
+
+
+def test_missing_post_review_keeps_knowledge_post_waiting_and_verification_pending(
+    tmp_path,
+):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    (task_path.parent / "knowledge" / "post-review.json").unlink()
+
+    summary = runner.resume(task_path)
+
+    assert summary.status == "needs_user_input"
+    assert summary.stage("knowledge_post").status == "waiting"
+    assert summary.stage("verification").status == "pending"
+    assert not (task_path.parent / "knowledge" / "post-receipt.json").exists()
+    assert (task_path.parent / "work_orders" / "knowledge-post.md").is_file()
+
+
+def test_knowledge_post_receipt_covers_conflict_and_candidate_resolution(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+
+    summary = runner.resume(task_path)
+
+    receipt = json.loads(
+        (task_path.parent / "knowledge" / "post-receipt.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary.status == "completed"
+    assert receipt["completed_question_ids"] == ["Q1"]
+    assert receipt["resolutions"] == [
+        {
+            "candidate_status": "none",
+            "conflict_status": "none",
+            "question_id": "Q1",
+        }
+    ]
+
+
+def test_knowledge_post_repairs_a_semantically_forged_audit_prefix(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
     _write_valid_analysis(task_path)
     runner.resume(task_path)
-    post = task_path.parent / "knowledge" / "post_audit.json"
-    post.unlink()
+    receipt_path = task_path.parent / "knowledge" / "post-receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    audit_path = task_path.parent / receipt["audit_path"]
+    lines = audit_path.read_bytes().splitlines(keepends=True)
+    forged = {
+        "timestamp": "2026-08-23T00:00:00+00:00",
+        "task_id": "original-demo",
+        "stage": "post",
+        "event": "review",
+        "card_id": None,
+        "applicability": "not_applicable",
+        "reason": "伪造的非本题复核。",
+        "details": {"question_id": "Q999"},
+    }
+    forged_line = (
+        json.dumps(forged, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+    tampered = b"".join(lines[:-1]) + forged_line
+    audit_path.write_bytes(tampered)
+    receipt["audit_event_count"] = len(lines)
+    receipt["audit_prefix_sha256"] = hashlib.sha256(tampered).hexdigest()
+    receipt_path.write_text(
+        json.dumps(receipt, ensure_ascii=False), encoding="utf-8"
+    )
 
     runner.resume(task_path)
 
-    assert post.is_file()
+    repaired = json.loads(receipt_path.read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    assert repaired["audit_event_count"] == len(lines) + 1
+    assert events[-1]["stage"] == "post"
+    assert events[-1]["event"] == "review"
+    assert events[-1]["details"]["question_id"] == "Q1"
+
+
+def test_knowledge_post_rejects_candidate_modules_that_are_not_a_string_list(tmp_path):
+    task_path = _create_task(tmp_path)
+    runner = PipelineRunner(tmp_path)
+    runner.resume(task_path)
+    _write_valid_analysis(task_path)
+    review_path = task_path.parent / "knowledge" / "post-review.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    review["questions"][0]["candidate"] = {
+        "status": "candidate",
+        "reason": "形成了待验证的方法候选。",
+        "record": {
+            "card_type": "method",
+            "title": "原创候选",
+            "statement": "先核对题干限定，再组织证据。",
+            "modules": "reading_1",
+            "source": {
+                "id": "original-demo-Q1",
+                "kind": "text_inference",
+                "name": "原创题面推导",
+                "locator": "artifacts/extract/question_index.json#Q1",
+            },
+            "risk_level": "normal",
+        },
+    }
+    review_path.write_text(
+        json.dumps(review, ensure_ascii=False), encoding="utf-8"
+    )
+
+    summary = runner.resume(task_path)
+
+    assert summary.stage("knowledge_post").status == "waiting"
+    assert summary.stage("verification").status == "pending"
 
 
 def test_tampered_waiting_validation_report_is_repaired_without_new_stage_event(tmp_path):
@@ -731,6 +1001,28 @@ def test_answer_snapshot_rejects_nested_symlink_escape(tmp_path):
         attach_reference_answers(task_path, [answer])
 
     assert not any(outside.iterdir())
+
+
+@pytest.mark.parametrize("linked_component", ("answers", "answers/revisions"))
+def test_answer_attachment_rejects_ancestor_symlink_before_any_external_write(
+    tmp_path, linked_component
+):
+    task_path = _create_task(tmp_path)
+    answer = tmp_path / "原创参考答案.md"
+    answer.write_text("# 参考答案\n\n1. C。\n", encoding="utf-8")
+    outside = tmp_path / "outside-answers"
+    outside.mkdir()
+    target = task_path.parent / linked_component
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.rmdir()
+    target.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="answer.*symlink|unsafe") as captured:
+        attach_reference_answers(task_path, [answer])
+
+    assert list(outside.iterdir()) == []
+    assert str(tmp_path) not in str(captured.value)
 
 
 def test_runner_rejects_task_symlink_escape(tmp_path):

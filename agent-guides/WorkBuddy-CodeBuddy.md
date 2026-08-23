@@ -24,7 +24,7 @@ cekit doctor --report
 4. 校验、恢复运行，并人工逐页查看本地 DOCX 产物。详见[Word 生成与版式验收](../docs/Word生成与版式验收.md)。
 
 ```bash
-cekit init --name 原创练习 --input .local/inbox/原创练习.md
+cekit init --name 原创练习 --exam .local/inbox/原创练习.md
 cekit run --task .local/tasks/原创练习/task.json
 cekit validate --task .local/tasks/原创练习/task.json
 ```

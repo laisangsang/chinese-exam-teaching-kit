@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import platform
 from typing import Protocol, Sequence
 
 
@@ -39,3 +40,15 @@ class UnavailableOcr:
 
     def recognize(self, image: Path) -> str:
         raise CapabilityUnavailable(self.message)
+
+
+def default_ocr_provider(*, platform_name: str | None = None) -> OcrProvider:
+    """Return the exact built-in OCR provider used by document extraction."""
+    system = platform_name or platform.system()
+    if system == "Darwin":
+        from .macos import MacOSVisionOcr
+
+        return MacOSVisionOcr()
+    return UnavailableOcr(
+        "Built-in OCR is unavailable on this platform; provide a local OcrProvider"
+    )

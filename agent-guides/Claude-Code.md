@@ -8,7 +8,7 @@ Claude Code 支持项目记忆文件；其官方说明见[Memory 文档](https:/
 
 ```bash
 cekit doctor --report
-cekit init --name 原创练习 --input .local/inbox/原创练习.md
+cekit init --name 原创练习 --exam .local/inbox/原创练习.md
 cekit run --task .local/tasks/原创练习/task.json
 ```
 

@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "statuses": [
+    "candidate",
+    "verified",
+    "stable",
+    "review_required",
+    "deprecated"
+  ],
+  "risk_levels": ["normal", "high"],
+  "stable_min_exam_count": {
+    "normal": 2,
+    "high": 3
+  },
+  "verification_evidence_kinds": [
+    "formal_exam",
+    "formal_answer",
+    "text_inference"
+  ],
+  "modules": [
+    "reading_1",
+    "reading_2",
+    "classical_chinese",
+    "poetry",
+    "language_use",
+    "composition"
+  ],
+  "card_types": {
+    "overview": {"prefix": "OV", "directory": "overviews"},
+    "question_type": {"prefix": "QT", "directory": "question-types"},
+    "method": {"prefix": "MT", "directory": "methods"},
+    "case": {"prefix": "CS", "directory": "cases"}
+  },
+  "required_metadata": [
+    "schema_version",
+    "id",
+    "title",
+    "card_type",
+    "status",
+    "risk_level",
+    "modules",
+    "question_types",
+    "abilities",
+    "sources"
+  ],
+  "required_sections": [
+    "知识表述",
+    "适用条件",
+    "禁止越界",
+    "支持证据",
+    "反例与冲突"
+  ],
+  "required_source_fields": ["id", "kind", "name", "locator"],
+  "verification_case_fields": ["exam_id", "source_id"],
+  "verification_source_kind_map": {
+    "formal_exam": ["formal_exam"],
+    "formal_answer": ["formal_answer"],
+    "text_inference": ["text_inference", "original_example"]
+  },
+  "status_required_fields": {
+    "review_required": "review_reason",
+    "deprecated": "deprecation_reason"
+  },
+  "source_kinds": [
+    "formal_exam",
+    "formal_answer",
+    "text_inference",
+    "official_publication",
+    "original_example"
+  ]
+}

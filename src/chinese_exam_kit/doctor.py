@@ -10,6 +10,8 @@ import shutil
 import sys
 from typing import Literal
 
+from chinese_exam_kit.extract.providers import default_ocr_provider
+
 
 CapabilityLevel = Literal["core", "enhanced", "experimental"]
 
@@ -52,12 +54,19 @@ def inspect_environment() -> DoctorReport:
     """Inspect local tools only; this function never downloads or contacts a service."""
     transcription_modules = ("whisper", "faster_whisper", "speech_recognition")
     transcription_available = any(find_spec(module) is not None for module in transcription_modules)
+    ocr = default_ocr_provider()
+    ocr_available = ocr.available()
     capabilities = (
         Capability("python", sys.version_info >= (3, 11), "core", f"Python {sys.version.split()[0]}"),
         _module_capability("word", "docx", "core"),
         _module_capability("pdf_text", "pypdf", "core"),
         _command_capability("pdf_render", "pdftoppm", "enhanced"),
-        _command_capability("ocr", "tesseract", "enhanced"),
+        Capability(
+            "ocr",
+            ocr_available,
+            "enhanced",
+            f"{ocr.name} {'available' if ocr_available else 'unavailable'}",
+        ),
         _command_capability("video", "ffmpeg", "enhanced"),
         _command_capability("libreoffice", "libreoffice", "experimental"),
         _command_capability("swift", "swift", "experimental"),

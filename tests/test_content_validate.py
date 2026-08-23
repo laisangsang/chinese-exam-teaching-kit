@@ -36,6 +36,200 @@ def _write(path: Path, text: str) -> Path:
     return path
 
 
+def _question_contract() -> dict:
+    contract = json.loads(
+        files("chinese_exam_kit.resources")
+        .joinpath("content_contract.json")
+        .read_text(encoding="utf-8")
+    )
+    contract["validation"]["evidence_layers"] = []
+    for module in contract["modules"].values():
+        module["required_sections"] = []
+    return contract
+
+
+def _inventory(*questions: dict) -> str:
+    return (
+        "## 题目清单\n\n```json\n"
+        + json.dumps(
+            {"schema_version": 1, "questions": list(questions)},
+            ensure_ascii=False,
+        )
+        + "\n```\n"
+    )
+
+
+def _allocation(question_id: str, total: int, components: list[dict], **extra) -> str:
+    payload = {
+        "schema_version": 1,
+        "question_id": question_id,
+        "total": total,
+        "mode": "additive",
+        "components": components,
+        "cap": {"points": total, "rule": "本题封顶不超过题面总分。"},
+        "substitution_groups": [],
+    }
+    payload.update(extra)
+    return (
+        f"### 【建议分值构成】：{question_id}\n\n```json\n"
+        + json.dumps(payload, ensure_ascii=False)
+        + "\n```\n"
+    )
+
+
+def test_structured_inventory_allows_pure_objective_or_pure_subjective_modules(tmp_path):
+    contract = _question_contract()
+    objective = _write(
+        tmp_path / "objective.md",
+        "# 纯客观题\n\n"
+        + _inventory({"id": "第1题", "kind": "choice", "score": None, "options": ["A", "B"]})
+        + "\n### 选择题：第1题\n\n"
+        + "\n".join(
+            f"#### {option}项\n\n- 原文位置：原创材料。\n- 选项改写：原创改写。\n- 正误判断：正确。\n- 设误类型：无。\n"
+            for option in ("A", "B")
+        ),
+    )
+    subjective = _write(
+        tmp_path / "subjective.md",
+        "# 纯主观题\n\n"
+        + _inventory({"id": "第2题", "kind": "subjective", "score": None})
+        + "\n### 主观题：第2题\n\n"
+        + "- 审题：明确任务。\n- 证据：定位原文。\n- 关系：整合信息。\n"
+        + "- 评分点：拆分要点。\n- 参考答案：组织答案。\n- 失分诊断：说明风险。\n",
+    )
+
+    objective_codes = {issue.code for issue in validate_file(objective, "reading_1", contract)}
+    subjective_codes = {issue.code for issue in validate_file(subjective, "reading_1", contract)}
+
+    assert not {"missing_option_evidence", "missing_subjective_chain", "unexpected_question_block"} & objective_codes
+    assert not {"missing_option_evidence", "missing_subjective_chain", "unexpected_question_block"} & subjective_codes
+
+
+def test_inventory_rejects_fabricated_choice_block(tmp_path):
+    source = _write(
+        tmp_path / "source.md",
+        "# 原创\n\n"
+        + _inventory({"id": "第2题", "kind": "subjective", "score": None})
+        + "\n"
+        + _complete_option_question("第1题")
+        + "\n"
+        + _complete_subjective_question("第2题"),
+    )
+
+    issues = validate_file(source, "reading_1", _question_contract())
+
+    assert any(issue.code == "unexpected_question_block" and "第1题" in issue.message for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "questions",
+    (
+        (
+            {"id": "第1题", "kind": "other", "score": None},
+            {"id": " 第1题 ", "kind": "other", "score": None},
+        ),
+        (
+            {
+                "id": "第1题",
+                "kind": "choice",
+                "score": None,
+                "options": ["A", " A "],
+            },
+        ),
+        ({"id": "第1题", "kind": "other", "score": float("inf")},),
+    ),
+)
+def test_inventory_rejects_normalized_duplicates_and_nonfinite_scores(
+    tmp_path, questions
+):
+    source = _write(tmp_path / "source.md", "# 原创\n\n" + _inventory(*questions))
+
+    issues = validate_file(source, "reading_1", _question_contract())
+
+    assert any(issue.code == "invalid_question_inventory" for issue in issues)
+
+
+def test_scored_question_requires_a_labeled_allocation(tmp_path):
+    source = _write(
+        tmp_path / "source.md",
+        "# 原创\n\n" + _inventory({"id": "第1题", "kind": "other", "score": 5}),
+    )
+
+    issues = validate_file(source, "reading_1", _question_contract())
+
+    assert any(issue.code == "missing_score_allocation" for issue in issues)
+
+
+def test_score_allocation_rejects_wrong_sum_and_ungrouped_substitutes(tmp_path):
+    wrong_sum = _write(
+        tmp_path / "wrong.md",
+        "# 原创\n\n"
+        + _inventory({"id": "第1题", "kind": "other", "score": 5})
+        + _allocation("第1题", 5, [{"id": "a", "label": "要点一", "points": 2}, {"id": "b", "label": "要点二", "points": 2}]),
+    )
+    double_count = _write(
+        tmp_path / "double.md",
+        "# 原创\n\n"
+        + _inventory({"id": "第1题", "kind": "other", "score": 5})
+        + _allocation(
+            "第1题",
+            5,
+            [
+                {"id": "core", "label": "核心点", "points": 3},
+                {"id": "alt-a", "label": "替代点甲", "points": 2},
+                {"id": "alt-b", "label": "替代点乙", "points": 2},
+            ],
+        ),
+    )
+
+    assert any(issue.code == "score_total_mismatch" for issue in validate_file(wrong_sum, "reading_1", _question_contract()))
+    assert any(issue.code == "score_total_mismatch" for issue in validate_file(double_count, "reading_1", _question_contract()))
+
+
+def test_score_allocation_models_cap_substitution_and_holistic_boundaries(tmp_path):
+    additive = _write(
+        tmp_path / "additive.md",
+        "# 原创\n\n"
+        + _inventory({"id": "第1题", "kind": "other", "score": 5})
+        + _allocation(
+            "第1题",
+            5,
+            [
+                {"id": "core", "label": "核心点", "points": 3},
+                {"id": "alt-a", "label": "替代点甲", "points": 2},
+                {"id": "alt-b", "label": "替代点乙", "points": 2},
+            ],
+            substitution_groups=[{"component_ids": ["alt-a", "alt-b"], "rule": "两个替代点不重复计分。"}],
+        ),
+    )
+    holistic_payload = {
+        "schema_version": 1,
+        "question_id": "第2题",
+        "total": 60,
+        "mode": "holistic",
+        "components": [],
+        "cap": {"points": 60, "rule": "整体评定封顶为60分。"},
+        "substitution_groups": [],
+        "holistic_rule": "按等级内容、表达与任务完成度整体裁量。",
+        "bands": [
+            {"min": 0, "max": 19, "rule": "基础等级。"},
+            {"min": 20, "max": 39, "rule": "中间等级。"},
+            {"min": 40, "max": 60, "rule": "较高等级。"},
+        ],
+    }
+    holistic = _write(
+        tmp_path / "holistic.md",
+        "# 原创\n\n"
+        + _inventory({"id": "第2题", "kind": "composition", "score": 60})
+        + "\n### 【建议分值构成】：第2题\n\n```json\n"
+        + json.dumps(holistic_payload, ensure_ascii=False)
+        + "\n```\n",
+    )
+
+    assert not any(issue.code.startswith("score_") or issue.code == "invalid_score_allocation" for issue in validate_file(additive, "reading_1", _question_contract()))
+    assert not any(issue.code.startswith("score_") or issue.code == "invalid_score_allocation" for issue in validate_file(holistic, "composition", _question_contract()))
+
+
 def test_reading_one_requires_all_option_evidence(tmp_path):
     source = _write(
         tmp_path / "01.md",
